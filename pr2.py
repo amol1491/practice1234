@@ -82,9 +82,9 @@ dpt_list = [62, 69,97,14,37,27,39,28,74,33,30,36,75,85,80,20,22,55,72,15,62,32,7
 
 if cloudrunjob_mode:
  # cloudrunjobで動かすモード
+    tenpo_cd = tenpo_cd_list[TASK_INDEX]
     if TASK_INDEX != 0 and CALL_NEXT_PIPELINE == 1:
         # stage2完了チェックフォルダ配下のファイル削除
-        tenpo_cd = tenpo_cd_list[TASK_INDEX]
         logger.info('Deleting files under stage2 completion check folder...')
         blobs = storage_client.list_blobs(
             bucket, prefix='vertex_pipelines/pipeline/pipeline_shortterm1/chetk_stage2_weekly_complete/completed_')
@@ -100,7 +100,7 @@ else:
     logger.info(f'tenpo_cd: {tenpo_cd}')
     TODAY_OFFSET = 0
     logger.info(f'TODAY_OFFSET: {TODAY_OFFSET}')
-    OUTPUT_TABLE_SUFFIX = '_suzuki_ukeire_test_pipinstalled'
+    OUTPUT_TABLE_SUFFIX = '_suzuki_ukeire_test'
     logger.info(f'OUTPUT_TABLE_SUFFIX: {OUTPUT_TABLE_SUFFIX}')
     OUTPUT_COLLECTED_SALES_VALUE = 0
     logger.info(f'OUTPUT_COLLECTED_SALES_VALUE: {OUTPUT_COLLECTED_SALES_VALUE}')
@@ -113,17 +113,22 @@ else:
     THEME_MD_MODE = 0
     logger.info(f'THEME_MD_MODE: {THEME_MD_MODE}')
 
-    
-tenpo_cd = tenpo_cd_list[TASK_INDEX]
+
 ## シーズン品に絞るかを指定
 season_flag = False
 #model_name=config['model_name']
 
-## 中央値特徴量の作成範囲（TSにおける派生ウィンドウと合わせる
+if season_flag:
+    with open('input_data/00_config_season.yaml') as file:
+        config = yaml.safe_load(file.read())
+else:
+    with open('input_data/00_config_not_season.yaml') as file:
+        config = yaml.safe_load(file.read())
 
+        
+model_name=config['model_name']
 # 必要なパスの取り出し
-#path_week_master = config['path_week_master']
-path_week_master = "short_term_train/01_Data/10_week_m/WEEK_MST.csv"
+path_week_master = config['path_week_master']
 start_t = time.time()
 use_past_stage1_data_flag = True
 #past_days_num = -1
@@ -235,18 +240,21 @@ startpont_this_week = False
 #last_month_weight_larger = True # (学習用の処理なのでコメントのみ記載)
 
 # メトリックスの出力先をテスト用テーブルにする
-output_metrics_test_tbl = True
+output_metrics_test_tbl = False
 # 補正済みデータの出力先をテストテーブルにする
-output_collected_sales_value_test_table = True
+output_collected_sales_value_test_table = False
 
 # 繁忙期フラグ
 salesup_flag = True
 
-#col_lag = config['col_lag']
+col_lag = config['col_lag']
+bucket_name = config['bucket_name']
+storage_client = storage.Client()
+bucket = storage_client.bucket(bucket_name)
 
 col_id = '商品コード'
-# col_target = config["target"]
-# col_time = config["feature_timeline"]
+col_target = config["target"]
+col_time = config["feature_timeline"]
 
 tenpo_cd_ref = None
 path_tran_ref = None        
@@ -1614,129 +1622,173 @@ def calculate_sales_metrics(today_nenshudo, dfc_tmp, train_df):
     
 def optimize_odas_improvement(sales_df):
 
-    if not odas_imprvmnt:
-        logger.info('odas_imprvmnt == False')
+    if odas_imprvmnt == False:
         sales_df["URI_SU"] = sales_df["URI_SU"] - sales_df["odas_amount"]
-        return sales_df  # Early exit if no ODAS improvement
+    else:
+        odas_correction_start_t = time.time()
+        logger.info('start odas correction improvements *******************************')
 
-    logger.info('odas_imprvmnt == True')
 
-    odas_correction_start_t = time.time()
-    logger.info('start odas correction improvements *******************************')
+        sales_df["URI_SU_NEW"] = sales_df["URI_SU"] - sales_df["odas_amount"]
 
-    # Initial ODAS Correction
-    sales_df["URI_SU_NEW"] = sales_df["URI_SU"] - sales_df["odas_amount"]
+        # 0以下を0にする
+        sales_df["URI_SU_NEW_org"] = sales_df["URI_SU_NEW"]
+        sales_df["URI_SU_NEW"][sales_df["URI_SU_NEW"]<0] = 0
 
-    # Clip negative values to 0
-    sales_df["URI_SU_NEW_org"] = sales_df["URI_SU_NEW"].copy() #keep original value
-    sales_df["URI_SU_NEW"] = sales_df["URI_SU_NEW"].clip(lower=0) #replace negative with 0
 
-    # Rolling Mode and Sigma Calculation
-    sales_df['URI_SU_NEW_STD'] = sales_df.groupby("PRD_CD")['URI_SU_NEW'].transform(lambda x: x.std())
-    sales_df['URI_SU_NEW_8MODE'] = sales_df.groupby("PRD_CD")['URI_SU_NEW'].transform(lambda x: x.rolling(window=8).apply(lambda y: np_mode2(y)))
-    sales_df['URI_SU_NEW_8MODE'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_8MODE'].transform(lambda x: x.interpolate(limit_direction='both'))
+        # まずは極端なピークを除外した平均値を見たい***********************************************************
+        # ここで8週最頻値±2σの範囲のデータを作成、外れる箇所は線形補間する
+        sales_df['URI_SU_NEW_STD'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW'].transform(lambda x:x.std())    
+        sales_df['URI_SU_NEW_8MODE'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW'].transform(lambda x:x.rolling(window=8).apply(lambda y: np_mode2(y)))    
+        sales_df['URI_SU_NEW_8MODE'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_8MODE'].transform(lambda x: x.interpolate(limit_direction='both'))
 
-    # 2 Sigma Bands calculation
-    std_multiple = 2 * sales_df["URI_SU_NEW_STD"]
-    sales_df["URI_SU_NEW_2SIGMA_LOWER"] = sales_df['URI_SU_NEW_8MODE'] - std_multiple
-    sales_df["URI_SU_NEW_2SIGMA_UPPER"] = sales_df['URI_SU_NEW_8MODE'] + std_multiple
+        # 8週MODE±2σを超える値にnanを設定して、
+        sales_df["URI_SU_NEW_2SIGMA_LOWER"] = sales_df['URI_SU_NEW_8MODE'] - 2*sales_df["URI_SU_NEW_STD"]
+        sales_df["URI_SU_NEW_2SIGMA_UPPER"] = sales_df['URI_SU_NEW_8MODE'] + 2*sales_df["URI_SU_NEW_STD"]
 
-    #Impute Outliers with Nan and Interpolate:
-    outlier_condition = (sales_df["URI_SU_NEW"] < sales_df["URI_SU_NEW_2SIGMA_LOWER"]) | (sales_df["URI_SU_NEW"] > sales_df["URI_SU_NEW_2SIGMA_UPPER"])
+        sales_df["URI_SU_NEW_2SIGMA"] = sales_df["URI_SU_NEW"]
+        sales_df["URI_SU_NEW_2SIGMA"][
+            (sales_df["URI_SU_NEW"] < sales_df["URI_SU_NEW_2SIGMA_LOWER"])
+            |(sales_df["URI_SU_NEW"] > sales_df["URI_SU_NEW_2SIGMA_UPPER"])                       
+        ] = np.nan
 
-    sales_df["URI_SU_NEW_2SIGMA"] = sales_df["URI_SU_NEW"].mask(outlier_condition)
+        #sales_df['URI_SU_NEW_2SIGMA_BK'] = sales_df['URI_SU_NEW_2SIGMA']
 
-    sales_df['URI_SU_NEW_2SIGMA'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_2SIGMA'].transform(lambda x: x.interpolate(limit_direction='both'))
+        # nanを線形補完する
+        sales_df['URI_SU_NEW_2SIGMA'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_2SIGMA'].transform(lambda x: x.interpolate(limit_direction='both'))
 
-    # Calculate 8 week EMA
-    sales_df['URI_SU_NEW_2SIGMA_8EMA'] = sales_df.groupby("PRD_CD")['URI_SU_NEW_2SIGMA'].transform(lambda x: x.ewm(span=8).mean())
+        # 外れ値を補間しなおした売り数の8週平均をとる
+        sales_df['URI_SU_NEW_2SIGMA_8EMA'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW_2SIGMA'].transform(lambda x: x.ewm(span=8).mean())
 
-    logger.info('processing odas correction improvements *******************************')
-    odas_correction_end_t = time.time()
-    elapsed_time = odas_correction_end_t - odas_correction_start_t
-    logger.info(f"odas correction elapsed time: {elapsed_time:.3f} seconds")
 
-    
+        logger.info('processing odas correction improvements *******************************')
+        odas_correction_end_t = time.time()
+        elapsed_time = odas_correction_end_t - odas_correction_start_t
+        logger.info(f"odas correction elapsed time: {elapsed_time:.3f} seconds")
 
-    sales_df["URI_SU_NEW_OVER0"] = sales_df["URI_SU_NEW_org"].copy()
-    
-    # ODAS correction for negative values
-    neg_odas_condition = sales_df["URI_SU_NEW_OVER0"] < 0
-    
-    sales_df.loc[neg_odas_condition, "URI_SU_NEW_OVER0"] = sales_df['URI_SU_NEW_2SIGMA_8EMA'][neg_odas_condition]
+        # ここから補正の本処理　****************************************************************************************
+        # ODAS補正後にマイナスとなったものは、2σの8週平均で補完する
+        sales_df["URI_SU_NEW_OVER0"] = sales_df["URI_SU_NEW_org"]
+        sales_df["URI_SU_NEW_OVER0"][sales_df["URI_SU_NEW_OVER0"]<0] = sales_df['URI_SU_NEW_2SIGMA_8EMA'][sales_df["URI_SU_NEW_OVER0"]<0]
+        # ここであらためて0以下は0に置換
+        sales_df["URI_SU_NEW_OVER0"][sales_df["URI_SU_NEW_OVER0"]<0] = 0
 
-    # Ensure no values are below zero after the ODAS application:
-    sales_df.loc[sales_df["URI_SU_NEW_OVER0"] < 0, "URI_SU_NEW_OVER0"] = 0
+        # ODAS補正後がマイナスで、前後n週内に客数値に近い売りがあれば、nanをセットして線形補間していく  
+        sales_df['URI_SU_NEW_OVER0_8MODE'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW_OVER0'].transform(lambda x:x.rolling(window=8).apply(lambda y: np_mode2(y)))
+        sales_df['URI_SU_NEW_OVER0_8MODE'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_8MODE'].transform(lambda x: x.interpolate(limit_direction='both'))
+        sales_df['URI_SU_NEW_OVER0_STD'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW_OVER0'].transform(lambda x:x.std())
 
-    # Rolling calculations and spike detection
+        # MODE+2σをODASがあるときのスパイク補正の閾値とする
+        sales_df['URI_SU_NEW_OVER0_TH'] = sales_df['URI_SU_NEW_OVER0_8MODE'] + 2*sales_df['URI_SU_NEW_OVER0_STD']
+        # MODE+2σをODASがないときのスパイク補正の閾値とする
+        sales_df['URI_SU_NEW_OVER0_TH2'] = sales_df['URI_SU_NEW_OVER0_8MODE'] + 2*sales_df['URI_SU_NEW_OVER0_STD']
 
-    sales_df['URI_SU_NEW_OVER0_8MODE'] = sales_df.groupby("PRD_CD")['URI_SU_NEW_OVER0'].transform(lambda x: x.rolling(window=8).apply(lambda y: np_mode2(y)))
-    sales_df['URI_SU_NEW_OVER0_8MODE'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_8MODE'].transform(lambda x: x.interpolate(limit_direction='both'))
-    sales_df['URI_SU_NEW_OVER0_STD'] = sales_df.groupby("PRD_CD")['URI_SU_NEW_OVER0'].transform(lambda x:x.std())
 
-    # Threshold Calculations
-    sales_df['URI_SU_NEW_OVER0_TH'] = sales_df['URI_SU_NEW_OVER0_8MODE'] + 2*sales_df['URI_SU_NEW_OVER0_STD']
-    sales_df['URI_SU_NEW_OVER0_TH2'] = sales_df['URI_SU_NEW_OVER0_8MODE'] + 2*sales_df['URI_SU_NEW_OVER0_STD']
+        sales_df['URI_SU_NEW_OVER0_ROLLMAX'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW_OVER0'].transform(lambda x: x.rolling(7).max()).shift(-4)
+        sales_df['URI_SU_NEW_OVER0_ROLLMAX'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_ROLLMAX'].transform(lambda x: x.interpolate(limit_direction='both'))
 
-    # Rolling Statistics (Max and Min):
-    sales_df['URI_SU_NEW_OVER0_ROLLMAX'] = sales_df.groupby("PRD_CD")['URI_SU_NEW_OVER0'].transform(lambda x: x.rolling(7).max().shift(-4))
-    sales_df['URI_SU_NEW_OVER0_ROLLMAX'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_ROLLMAX'].transform(lambda x: x.interpolate(limit_direction='both'))
-    sales_df['URI_SU_NEW_OVER0_ROLLMIN'] = sales_df.groupby("PRD_CD")['URI_SU_NEW_OVER0'].transform(lambda x: x.rolling(7).min().shift(-4))
-    sales_df['URI_SU_NEW_OVER0_ROLLMIN'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_ROLLMIN'].transform(lambda x: x.interpolate(limit_direction='both'))
+        # 7週移動min（-ピーク検出用）
+        sales_df['URI_SU_NEW_OVER0_ROLLMIN'] = sales_df.groupby("PRD_CD",as_index=False)['URI_SU_NEW_OVER0'].transform(lambda x: x.rolling(7).min()).shift(-4)
+        sales_df['URI_SU_NEW_OVER0_ROLLMIN'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_ROLLMIN'].transform(lambda x: x.interpolate(limit_direction='both'))
 
-    sales_df['odas_amount_ROLLMAX'] = sales_df.groupby("PRD_CD")['odas_amount'].transform(lambda x: x.rolling(7).max().shift(-4))
-    sales_df['odas_amount_ROLLMAX'] = sales_df.groupby(["PRD_CD"])['odas_amount_ROLLMAX'].transform(lambda x: x.interpolate(limit_direction='both'))
+        # ODAS7週移動max（補正ありの検出用
+        sales_df['odas_amount_ROLLMAX'] = sales_df.groupby("PRD_CD",as_index=False)['odas_amount'].transform(lambda x: x.rolling(7).max()).shift(-4)
+        sales_df['odas_amount_ROLLMAX'] = sales_df.groupby(["PRD_CD"])['odas_amount_ROLLMAX'].transform(lambda x: x.interpolate(limit_direction='both'))
 
-    # Spike Imputation
-    sales_df['URI_SU_NEW_OVER0_IMPLVMNT'] = sales_df['URI_SU_NEW_OVER0'].copy()
-    sales_df['URI_SU_NEW_OVER0_IMPLVMNT_TYPE'] = np.nan  # Initialize the spike type
+        # ODAS補正があって、マイナスが発生していて、スパイクも残っている
+        # のであれば、nanをセットして、線形補完する
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT'] = sales_df['URI_SU_NEW_OVER0']
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT_TYPE'] = np.nan
 
-    # Define Conditions for +Spikes and -Spikes:
-    condition_plus_spike = (sales_df['odas_amount_ROLLMAX'] > 0) & \
-                           (sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH']) & \
-                           (sales_df['URI_SU_NEW_OVER0_ROLLMAX'] >= (sales_df['odas_amount_ROLLMAX'] * 0.45)) & \
-                           (sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH'])
+        # ＋スパイクが残る場合
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT'][
+        (sales_df['odas_amount_ROLLMAX'] > 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH'])
+        #&(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] >= (sales_df['odas_amount_ROLLMAX']*0.7))
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] >= (sales_df['odas_amount_ROLLMAX']*0.45))
+        &(sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH'])
+        ] = np.nan
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT_TYPE'][
+        (sales_df['odas_amount_ROLLMAX'] > 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH'])
+        #&(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] >= (sales_df['odas_amount_ROLLMAX']*0.7))
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] >= (sales_df['odas_amount_ROLLMAX']*0.45))
+        &(sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH'])
+        ] = '_+spike'
 
-    condition_minus_spike = (sales_df['URI_SU_NEW_OVER0'] < 0) & \
-                            (sales_df['odas_amount_ROLLMAX'] > 0) & \
-                            (sales_df['URI_SU_NEW_OVER0_ROLLMIN'] < (sales_df['URI_SU_NEW_OVER0_TH'] * (-1)))
+        # -スパイクが残る場合
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT'][
+        (sales_df['URI_SU_NEW_OVER0'] < 0)    
+        &(sales_df['odas_amount_ROLLMAX'] > 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMIN'] < (sales_df['URI_SU_NEW_OVER0_TH']*(-1)))
+        ] = np.nan
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT_TYPE'][
+        (sales_df['URI_SU_NEW_OVER0'] < 0)    
+        &(sales_df['odas_amount_ROLLMAX'] > 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMIN'] < (sales_df['URI_SU_NEW_OVER0_TH']*(-1)))
+        ] = '_-spike'
 
-    condition_plus_spike_no_odas = (sales_df['odas_amount_ROLLMAX'] == 0) & \
-                                  (sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH2']) & \
-                                  (sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH2']) & \
-                                  (sales_df['URI_SU_NEW_OVER0'] > (sales_df['URI_SU_NEW_OVER0_8MODE'] + 1) * 8) & \
-                                  (sales_df['URI_SU_NEW_OVER0'] >= 100)
+        # ODAS値が無いのにスパイクのあるものをどうするか？
+        # ＋スパイクが残る場合
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT'][
+        (sales_df['odas_amount_ROLLMAX'] == 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH2'])
+        &(sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH2'])
 
-    # Apply the Imputation and Spike Types:
-    sales_df.loc[condition_plus_spike, 'URI_SU_NEW_OVER0_IMPLVMNT'] = np.nan
-    sales_df.loc[condition_plus_spike, 'URI_SU_NEW_OVER0_IMPLVMNT_TYPE'] = '_+spike'
+        &(sales_df['URI_SU_NEW_OVER0'] > (sales_df['URI_SU_NEW_OVER0_8MODE'] + 1) * 8)
+        &(sales_df['URI_SU_NEW_OVER0'] >= 100)
 
-    sales_df.loc[condition_minus_spike, 'URI_SU_NEW_OVER0_IMPLVMNT'] = np.nan
-    sales_df.loc[condition_minus_spike, 'URI_SU_NEW_OVER0_IMPLVMNT_TYPE'] = '_-spike'
 
-    sales_df.loc[condition_plus_spike_no_odas, 'URI_SU_NEW_OVER0_IMPLVMNT'] = np.nan
-    sales_df.loc[condition_plus_spike_no_odas, 'URI_SU_NEW_OVER0_IMPLVMNT_TYPE'] = '_+spike_without_odas'
+        ] = np.nan
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT_TYPE'][
+        (sales_df['odas_amount_ROLLMAX'] == 0)
+        &(sales_df['URI_SU_NEW_OVER0_ROLLMAX'] > sales_df['URI_SU_NEW_OVER0_TH2'])
+        &(sales_df['URI_SU_NEW_OVER0'] > sales_df['URI_SU_NEW_OVER0_TH2'])
 
-    # Interpolate the imputed sales data
-    sales_df['URI_SU_NEW_OVER0_IMPLVMNT'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_IMPLVMNT'].transform(lambda x: x.interpolate(limit_direction='both'))
+        &(sales_df['URI_SU_NEW_OVER0'] > (sales_df['URI_SU_NEW_OVER0_8MODE'] + 1) * 8)
+        &(sales_df['URI_SU_NEW_OVER0'] >= 100)
 
-    # Update the Main Sales Column
-    sales_df['URI_SU'] = sales_df['URI_SU_NEW_OVER0_IMPLVMNT']
+        ] = '_+spike_without_odas'
 
-    # Drop Intermediate Columns for Cleanliness:
-    cols_to_drop = [
-        'URI_SU_NEW_STD', 'URI_SU_NEW_8MODE', 'URI_SU_NEW_2SIGMA_LOWER',
-        'URI_SU_NEW_2SIGMA_UPPER', 'URI_SU_NEW_2SIGMA', 'URI_SU_NEW_2SIGMA_8EMA',
-        'URI_SU_NEW_OVER0', 'URI_SU_NEW_OVER0_8MODE', 'URI_SU_NEW_OVER0_STD',
-        'URI_SU_NEW_OVER0_TH', 'URI_SU_NEW_OVER0_TH2', 'URI_SU_NEW_OVER0_ROLLMAX',
-        'URI_SU_NEW_OVER0_ROLLMIN', 'odas_amount_ROLLMAX', 'URI_SU_NEW_OVER0_IMPLVMNT'
-    ]
-    sales_df = sales_df.drop(columns=cols_to_drop)
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT_bk'] = sales_df['URI_SU_NEW_OVER0_IMPLVMNT']
 
-    logger.info('end odas Correction improvements *******************************')
-    odas_correction_end_t = time.time()
-    elapsed_time = odas_correction_end_t - odas_correction_start_t
-    logger.info(f"odas correction elapsed time: {elapsed_time:.3f} seconds")
+        sales_df['URI_SU_NEW_OVER0_IMPLVMNT'] = sales_df.groupby(["PRD_CD"])['URI_SU_NEW_OVER0_IMPLVMNT'].transform(lambda x: x.interpolate(limit_direction='both'))
+
+        #myprdlist = list(sales_df[sales_df['URI_SU_NEW_OVER0_IMPLVMNT_bk'].isna()]['PRD_CD'].unique())
+        #sales_df_ex = sales_df[sales_df['PRD_CD'].isin(myprdlist)]
+
+        #sales_df_ex.to_csv('sales_df_ex.csv')
+
+        #print('test exit')
+        #sys.exit()
+
+
+        sales_df['URI_SU'] = sales_df['URI_SU_NEW_OVER0_IMPLVMNT']
+
+        #sales_df = sales_df.drop('URI_SU_NEW_8EMA', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_STD', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_8MODE', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_2SIGMA_LOWER', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_2SIGMA_UPPER', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_2SIGMA', axis=1)
+
+        #sales_df = sales_df.drop('URI_SU_NEW_2SIGMA_BK', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_2SIGMA_8EMA', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_8MODE', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_STD', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_TH', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_TH2', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_ROLLMAX', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_ROLLMIN', axis=1)
+        sales_df = sales_df.drop('odas_amount_ROLLMAX', axis=1)
+        sales_df = sales_df.drop('URI_SU_NEW_OVER0_IMPLVMNT', axis=1)
+
+        logger.info('end odas Correction improvements *******************************')
+        odas_correction_end_t = time.time()
+        elapsed_time = odas_correction_end_t - odas_correction_start_t
+        logger.info(f"odas correction elapsed time: {elapsed_time:.3f} seconds")
+
 
     return sales_df
 
@@ -1947,10 +1999,10 @@ def calculate_and_update_metrics(sales_df, today_nenshudo, dfc_tmp, tenpo_cd, df
         metrics_result['TENPO_CD'] = tenpo_cd
         metrics_result['NENSHUDO'] = today_nenshudo
         
-        #if output_6wk_2sales:
-        #    metrics_result['MODEL_TYPE'] = 'medium'
-        #else:
-        metrics_result['MODEL_TYPE'] = 'weekly'
+        if output_6wk_2sales:
+            metrics_result['MODEL_TYPE'] = 'medium'
+        else:
+            metrics_result['MODEL_TYPE'] = 'weekly'
         
         metrics_result = metrics_result.rename(columns={
             '商品コード':'PrdCd', 
@@ -2104,24 +2156,23 @@ def calculate_and_update_metrics(sales_df, today_nenshudo, dfc_tmp, tenpo_cd, df
 
 
 def process_sales_data2(sales_df, df_calendar, dftarget2, tenpo_cd, sales_df_saved):
-    if 1:
+    if 1:    
         # *********************************************************************************************
         # ここから、前年売り数、前年売り数に関連する特徴量を作成する処理開始
         # *********************************************************************************************
         # 前年売り数 (ここはinner joinしてるので、元々あるレコードのみ、売り数０のレコードは無い)
         sales_df = pd.merge(sales_df, df_calendar, on="nenshudo")
         # 前週まで入っている
-
-        rename_dict = {'URI_SU':'前年売上実績数量', 'PRD_CD':'商品コード', 'week_from_ymd': '前年週開始日付'}
-
         if add_ec_salesamount:
-            rename_dict['URI_SU_EC'] = '前年EC売上実績数量'
             if class_wave_add:
-                rename_dict['URI_SU_CLASS'] = '前年CLASS売上実績数量'
                 if class_wave_mean_add:
-                    rename_dict['URI_SU_CLASS8ema'] = '前年CLASS売上実績数量8ema'
-
-        sales_df = sales_df.rename(columns=rename_dict)
+                    sales_df = sales_df.rename(columns={'URI_SU':'前年売上実績数量', 'URI_SU_EC':'前年EC売上実績数量', 'URI_SU_CLASS':'前年CLASS売上実績数量', 'URI_SU_CLASS8ema':'前年CLASS売上実績数量8ema', 'PRD_CD':'商品コード', 'week_from_ymd': '前年週開始日付'})
+                else:
+                    sales_df = sales_df.rename(columns={'URI_SU':'前年売上実績数量', 'URI_SU_EC':'前年EC売上実績数量', 'URI_SU_CLASS':'前年CLASS売上実績数量', 'PRD_CD':'商品コード', 'week_from_ymd': '前年週開始日付'})            
+            else:
+                sales_df = sales_df.rename(columns={'URI_SU':'前年売上実績数量', 'URI_SU_EC':'前年EC売上実績数量', 'PRD_CD':'商品コード', 'week_from_ymd': '前年週開始日付'})
+        else:
+            sales_df = sales_df.rename(columns={'URI_SU':'前年売上実績数量', 'PRD_CD':'商品コード', 'week_from_ymd': '前年週開始日付'})
 
         sales_df = sales_df.drop('nenshudo', axis=1).reset_index(drop=True)
 
@@ -2130,87 +2181,78 @@ def process_sales_data2(sales_df, df_calendar, dftarget2, tenpo_cd, sales_df_sav
         # dftarget2（商品番号×カレンダーだけのデータ）に、売り数等のデータを結合（DPTなど）
         # ここで、売り数０の週レコードが作成される
         ######################################################################################
-        merge_cols = ['商品コード', '前年週開始日付']
-        target2_rename = {'店舗コード':'TENPO_CD'}
-        dftarget3 = dftarget2.rename(columns=target2_rename)
-
-        merge_cols_sales_df = ['商品コード', '前年週開始日付', '前年売上実績数量']
         if add_ec_salesamount:
-            merge_cols_sales_df.append('前年EC売上実績数量')
             if class_wave_add:
-                merge_cols_sales_df.append('前年CLASS売上実績数量')
                 if class_wave_mean_add:
-                    merge_cols_sales_df.append('前年CLASS売上実績数量8ema')
+                    dftarget3 = pd.merge(dftarget2.rename(columns={'店舗コード':'TENPO_CD'}), sales_df[['商品コード', '前年週開始日付', '前年売上実績数量', '前年EC売上実績数量', '前年CLASS売上実績数量', '前年CLASS売上実績数量8ema']], on=['商品コード', '前年週開始日付'], how='left')                   
+                else:
+                    dftarget3 = pd.merge(dftarget2.rename(columns={'店舗コード':'TENPO_CD'}), sales_df[['商品コード', '前年週開始日付', '前年売上実績数量', '前年EC売上実績数量', '前年CLASS売上実績数量']], on=['商品コード', '前年週開始日付'], how='left')        
+            else:
+                dftarget3 = pd.merge(dftarget2.rename(columns={'店舗コード':'TENPO_CD'}), sales_df[['商品コード', '前年週開始日付', '前年売上実績数量', '前年EC売上実績数量']], on=['商品コード', '前年週開始日付'], how='left')
 
-        dftarget3 = pd.merge(dftarget3, sales_df[merge_cols_sales_df], on=merge_cols, how='left')
+        else:
+            dftarget3 = pd.merge(dftarget2.rename(columns={'店舗コード':'TENPO_CD'}), sales_df[['商品コード', '前年週開始日付', '前年売上実績数量']], on=['商品コード', '前年週開始日付'], how='left')   
 
         ### ここで補間が必要
         dftarget3 = interpolate_df2(dftarget3)
         dftarget3['TENPO_CD'] = tenpo_cd
         dftarget3 = dftarget3.fillna(0).reset_index(drop=True)
 
-        selected_cols = ["商品コード","週開始日付_予測対象","前年週開始日付","前年売上実績数量","TENPO_CD","nenshudo", 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']
+        if add_ec_salesamount:
+            if class_wave_add:
+                if class_wave_mean_add:
+                    dftarget3 = dftarget3[["商品コード","週開始日付_予測対象","前年週開始日付","前年売上実績数量",
+                                           "前年EC売上実績数量","前年CLASS売上実績数量","前年CLASS売上実績数量8ema",
+                                           "TENPO_CD","nenshudo", 'baika_toitsu', 'BAIKA', 'DPT', 
+                                           'line_cd', 'cls_cd', 'hnmk_cd']]
+
+                else:
+                    dftarget3 = dftarget3[["商品コード","週開始日付_予測対象","前年週開始日付","前年売上実績数量","前年EC売上実績数量","前年CLASS売上実績数量","TENPO_CD","nenshudo", 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
+            else:
+                dftarget3 = dftarget3[["商品コード","週開始日付_予測対象","前年週開始日付","前年売上実績数量","前年EC売上実績数量","TENPO_CD","nenshudo", 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
+        else:
+            dftarget3 = dftarget3[["商品コード","週開始日付_予測対象","前年週開始日付","前年売上実績数量","TENPO_CD","nenshudo", 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
+
+
+        dftarget3 = dftarget3.drop_duplicates().reset_index(drop=True)
+        dftarget3['time_leap8'] = dftarget3.groupby('商品コード',as_index=False)['前年売上実績数量'].transform(lambda x: x.ewm(span=8).mean())
 
         if add_ec_salesamount:
-            selected_cols.insert(4, "前年EC売上実績数量")
             if class_wave_add:
-                selected_cols.insert(5, "前年CLASS売上実績数量")
                 if class_wave_mean_add:
-                    selected_cols.insert(6, "前年CLASS売上実績数量8ema")
+                    df_vx_test = dftarget3[['商品コード','週開始日付_予測対象','前年売上実績数量', '前年EC売上実績数量', '前年CLASS売上実績数量', '前年CLASS売上実績数量8ema', 'time_leap8','nenshudo', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]                            
+                else:
+                    df_vx_test = dftarget3[['商品コード','週開始日付_予測対象','前年売上実績数量', '前年EC売上実績数量', '前年CLASS売上実績数量', 'time_leap8','nenshudo', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]            
+            else:
+                df_vx_test = dftarget3[['商品コード','週開始日付_予測対象','前年売上実績数量', '前年EC売上実績数量', 'time_leap8','nenshudo', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
+        else:
+            df_vx_test = dftarget3[['商品コード','週開始日付_予測対象','前年売上実績数量', 'time_leap8','nenshudo', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
 
 
-        dftarget3 = dftarget3[selected_cols].drop_duplicates().reset_index(drop=True)
-        dftarget3['time_leap8'] = dftarget3.groupby('商品コード')['前年売上実績数量'].transform(lambda x: x.ewm(span=8).mean())
+        sales_df_saved_tenpo = sales_df_saved[sales_df_saved['TENPO_CD'] == tenpo_cd].reset_index(drop=True)
 
 
-        vx_test_cols = ['商品コード','週開始日付_予測対象','前年売上実績数量', 'time_leap8','nenshudo', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']
-        insert_index = 3
+        if add_ec_salesamount:
+            if class_wave_add:
+                if class_wave_mean_add:
+                    sales_df_saved_tenpo = sales_df_saved_tenpo[['PRD_CD','nenshudo','URI_SU', 'URI_SU_EC', 'URI_SU_CLASS', 'URI_SU_CLASS8ema']]                
+                else:
+                    sales_df_saved_tenpo = sales_df_saved_tenpo[['PRD_CD','nenshudo','URI_SU', 'URI_SU_EC', 'URI_SU_CLASS']]
+            else:
+                sales_df_saved_tenpo = sales_df_saved_tenpo[['PRD_CD','nenshudo','URI_SU', 'URI_SU_EC']]
+        else:
+            sales_df_saved_tenpo = sales_df_saved_tenpo[['PRD_CD','nenshudo','URI_SU']]
 
-    if add_ec_salesamount:
-        vx_test_cols.insert(insert_index+1, '前年EC売上実績数量')
-        if class_wave_add:
-            vx_test_cols.insert(insert_index+2, '前年CLASS売上実績数量')
-            if class_wave_mean_add:
-                vx_test_cols.insert(insert_index+3, '前年CLASS売上実績数量8ema')
 
-    df_vx_test = dftarget3[vx_test_cols]
+        sales_df_saved_tenpo = sales_df_saved_tenpo.rename(columns={'PRD_CD':'商品コード'})
 
-    # ## *
-    # slaes_save_rename = {'PRD_CD':'商品コード'}
-    # sales_saved_cols = ['商品コード','nenshudo','URI_SU']
-    # if add_ec_salesamount:
-    #     slaes_save_rename['URI_SU_EC'] = 'URI_SU_EC'
-    #     sales_saved_cols = ['商品コード','nenshudo','URI_SU', 'URI_SU_EC']
-    #     if class_wave_add:
-    #         slaes_save_rename['URI_SU_CLASS'] = 'URI_SU_CLASS'
-    #         sales_saved_cols = ['商品コード','nenshudo','URI_SU', 'URI_SU_EC', 'URI_SU_CLASS']
-    #         if class_wave_mean_add:
-    #             slaes_save_rename['URI_SU_CLASS8ema'] = 'URI_SU_CLASS8ema'
-    #             sales_saved_cols = ['商品コード','nenshudo','URI_SU', 'URI_SU_EC', 'URI_SU_CLASS', 'URI_SU_CLASS8ema']
-    # print("sales_df_saved", sales_df_saved)
-    # sales_df_saved_tenpo = sales_df_saved[sales_df_saved['TENPO_CD'] == tenpo_cd][sales_saved_cols].rename(columns=slaes_save_rename).reset_index(drop=True)
 
-    
-    slaes_save_rename = {'PRD_CD': '商品コード'}  # Rename PRD_CD to 商品コード
-    sales_saved_cols = ['PRD_CD','nenshudo','URI_SU'] #use actual df column name
-    if add_ec_salesamount:
-        slaes_save_rename['URI_SU_EC'] = 'URI_SU_EC'
-        sales_saved_cols.append('URI_SU_EC') #append columns instead of rewrite
-        if class_wave_add:
-            slaes_save_rename['URI_SU_CLASS'] = 'URI_SU_CLASS'
-            sales_saved_cols.append('URI_SU_CLASS')
-            if class_wave_mean_add:
-                slaes_save_rename['URI_SU_CLASS8ema'] = 'URI_SU_CLASS8ema'
-                sales_saved_cols.append('URI_SU_CLASS8ema')
-                
-    sales_df_saved_tenpo = sales_df_saved[sales_df_saved['TENPO_CD'] == tenpo_cd][sales_saved_cols].rename(columns=slaes_save_rename).reset_index(drop=True)    
-    
-    # df_vx_test ：（前年URI_SU）、売り数０のレコードあり
-    #sales_df_saved_tenpo：（当年URI_SU）、売り数０のレコードは無し
-    sales_df_saved = pd.merge(df_vx_test, sales_df_saved_tenpo, on=['商品コード','nenshudo'],how='left')
-    sales_df_saved['URI_SU'] = sales_df_saved['URI_SU'].fillna(0).reset_index(drop=True)
+        # df_vx_test　　　　　：（前年URI_SU）、売り数０のレコードあり
+        #sales_df_saved_tenpo：（当年URI_SU）、売り数０のレコードは無し
+        sales_df_saved = pd.merge(df_vx_test, sales_df_saved_tenpo, on=['商品コード','nenshudo'],how='left')
+        sales_df_saved['URI_SU'] = sales_df_saved['URI_SU'].fillna(0).reset_index(drop=True)
 
-    return sales_df_saved, dftarget3
+        return sales_df_saved, dftarget3
 
 
 
@@ -2229,30 +2271,34 @@ def prepare_vx_test_data(sales_df_saved, tenpo_cd):
 
                 df_vx_test = df_vx_test[['PrdCd','WeekStartDate','PreviousYearSalesActualQuantity','PreviousYearEcSalesActualQuantity','PreviousYearClassSalesActualQuantity','PreviousYearClassSalesActualQuantity8ema', 'time_leap8', 'SalesAmount', 'SalesAmountEC', 'SalesAmountCLASS','SalesAmountCLASS8ema', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
 
+
+
             else:
                 df_vx_test = sales_df_saved.rename(columns={'商品コード': 'PrdCd', '週開始日付_予測対象':'WeekStartDate', '割引率':'DiscountRate','前年売上実績数量':'PreviousYearSalesActualQuantity', '前年EC売上実績数量':'PreviousYearEcSalesActualQuantity', '前年CLASS売上実績数量':'PreviousYearClassSalesActualQuantity', 'URI_SU':'SalesAmount', 'URI_SU_EC':'SalesAmountEC', 'URI_SU_CLASS':'SalesAmountCLASS'})
 
                 df_vx_test = df_vx_test[['PrdCd', 'WeekStartDate', 'PreviousYearSalesActualQuantity', 'PreviousYearEcSalesActualQuantity', 'PreviousYearClassSalesActualQuantity', 'time_leap8', 'SalesAmount', 'SalesAmountEC', 'SalesAmountCLASS', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
 
-            # sales_df_savedにはURI_SUはあるが、URI_SU_ECが無いので追加する
-        
+                # sales_df_savedにはURI_SUはあるが、URI_SU_ECが無いので追加する
+
         else:
             df_vx_test = sales_df_saved.rename(columns={'商品コード': 'PrdCd', '週開始日付_予測対象':'WeekStartDate', '割引率':'DiscountRate','前年売上実績数量':'PreviousYearSalesActualQuantity', '前年EC売上実績数量':'PreviousYearEcSalesActualQuantity', 'URI_SU':'SalesAmount', 'URI_SU_EC':'SalesAmountEC'})
 
             df_vx_test = df_vx_test[['PrdCd', 'WeekStartDate', 'PreviousYearSalesActualQuantity', 'PreviousYearEcSalesActualQuantity', 'time_leap8', 'SalesAmount', 'SalesAmountEC', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
 
-        # sales_df_savedにはURI_SUはあるが、URI_SU_ECが無いので追加する
-    
+            # sales_df_savedにはURI_SUはあるが、URI_SU_ECが無いので追加する
+
 
     else:
         df_vx_test = sales_df_saved.rename(columns={'商品コード': 'PrdCd', '週開始日付_予測対象':'WeekStartDate', '割引率':'DiscountRate','前年売上実績数量':'PreviousYearSalesActualQuantity','URI_SU':'SalesAmount'})   
-        
+
         df_vx_test = df_vx_test[['PrdCd', 'WeekStartDate', 'PreviousYearSalesActualQuantity',  'time_leap8', 'SalesAmount', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd']]
-        
+
+
     df_vx_test['weekstartdatestamp'] = pd.to_datetime(df_vx_test['WeekStartDate'], format = '%Y%m%d')
 
     df_vx_test = df_vx_test.dropna(subset=['PreviousYearSalesActualQuantity']).reset_index(drop=True)
     df_vx_test = df_vx_test.dropna(subset=['time_leap8']).reset_index(drop=True)
+
 
     if output_collected_sales_value == False:
         if kakaku_jizen_kichi == False:
@@ -2264,7 +2310,7 @@ def prepare_vx_test_data(sales_df_saved, tenpo_cd):
     if add_ec_salesamount:
         df_vx_test['PreviousYearEcSalesActualQuantity'] = df_vx_test['PreviousYearEcSalesActualQuantity'].astype(float)
         df_vx_test['SalesAmountEC'] = df_vx_test['SalesAmountEC'].astype(float)
-        
+
     if class_wave_add:
         df_vx_test['SalesAmountCLASS'] = df_vx_test['SalesAmountCLASS'].astype(float)
         df_vx_test['PreviousYearClassSalesActualQuantity'] = df_vx_test['PreviousYearClassSalesActualQuantity'].astype(float)
@@ -2272,7 +2318,7 @@ def prepare_vx_test_data(sales_df_saved, tenpo_cd):
         df_vx_test['SalesAmountCLASS8ema'] = df_vx_test['SalesAmountCLASS8ema'].astype(float)
         df_vx_test['PreviousYearClassSalesActualQuantity8ema'] = df_vx_test['PreviousYearClassSalesActualQuantity8ema'].astype(float)
 
-        
+
     df_vx_test['tenpo_cd'] = tenpo_cd
 
     df_vx_test = df_vx_test.drop_duplicates().reset_index(drop=True)
@@ -2289,7 +2335,7 @@ def prepare_vx_test_data(sales_df_saved, tenpo_cd):
 
     if no_sales_term_weight_zero:
         # SKU別にみて、最初に販売の無い期間はウェイトを0にしておく
-        
+
         # デフォルト値設定
         df_vx_test['training_weight'] = 10000
         # 販売期間のある最初の週をとってくる
@@ -2298,19 +2344,20 @@ def prepare_vx_test_data(sales_df_saved, tenpo_cd):
 
         df_vx_test_exist_sales2 = df_vx_test_exist_sales[['PrdCd', 'weekstartdatestamp_exist_sales_min']].drop_duplicates()
         del df_vx_test_exist_sales
-        
+
         prdcd_1stsalesweekstartdatestamp_dict = dict(zip(df_vx_test_exist_sales2['PrdCd'], df_vx_test_exist_sales2['weekstartdatestamp_exist_sales_min']))
-        
+
         weekstartdatestamp_min = df_vx_test['weekstartdatestamp'].min()
         df_vx_test['1stsalesweekstartdatestamp'] = df_vx_test['PrdCd'].apply(lambda x:prdcd_1stsalesweekstartdatestamp_dict.get(x, weekstartdatestamp_min))
-        
-        
+
+
         df_vx_test['training_weight'][df_vx_test['weekstartdatestamp'] < df_vx_test['1stsalesweekstartdatestamp']] = 0.0
-        
+
         # 後始末
         df_vx_test = df_vx_test.drop('1stsalesweekstartdatestamp', axis=1)
         del df_vx_test_exist_sales2
         del prdcd_1stsalesweekstartdatestamp_dict
+    
     
     return df_vx_test
     
@@ -2378,7 +2425,7 @@ def process_kakaku_jizen_kichi_data(df_vx_test, tenpo_cd, target_week_from_ymd):
 
         #店別売価変更予約
         path_list_price_yoyaku = "Basic_Analysis_unzip_result/01_Data/30_TEN_TNPN_YOYAKU/24_M030PRD_TEN_TNPN_INF_YOYAKU.csv"
-        list_price_yoyaku = extract_as_df(path_list_price_yoyaku)
+        list_price_yoyaku = common.extract_as_df(path_list_price_yoyaku, bucket_name)
         list_price_yoyaku = list_price_yoyaku[list_price_yoyaku['TENPO_CD']==tenpo_cd].reset_index(drop=True)
         
         check_baika_list = ['baika_toitsu', 'BAIKA']
@@ -2490,19 +2537,25 @@ def process_kakaku_jizen_kichi_data(df_vx_test, tenpo_cd, target_week_from_ymd):
 
 def upload_collected_sales_data(df_vx_test, today_nenshudo, df_calendar, max_syudo_dic):
     if OUTPUT_COLLECTED_SALES_VALUE:
+
         extract_start_nenshudo = calc_nenshudo(today_nenshudo, -13, max_syudo_dic)
         extract_start_week_from_ymd = df_calendar["week_from_ymd"][df_calendar["nenshudo"] == extract_start_nenshudo].values[0]
         today_week_from_ymd = df_calendar["week_from_ymd"][df_calendar["nenshudo"] == today_nenshudo].values[0]
 
         # 13週前から先週までのデータを抽出
         df_vx_test_colected_sales_value =  df_vx_test[(extract_start_week_from_ymd <= df_vx_test['WeekStartDate'])&(df_vx_test['WeekStartDate'] < today_week_from_ymd)].reset_index(drop=True)
-        
-        df_vx_test_colected_sales_value = df_vx_test_colected_sales_value[['PrdCd', 'WeekStartDate', 'PreviousYearSalesActualQuantity', 'time_leap8', 'SalesAmount', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd', 'weekstartdatestamp', 'tenpo_cd', 'TenpoCdPrdCd']]
-        
-        df_vx_test_colected_sales_value['NENSHUDO'] = today_nenshudo
-        df_vx_test_colected_sales_value['MODEL_TYPE'] = 'WEEKLY'
-        
 
+        df_vx_test_colected_sales_value = df_vx_test_colected_sales_value[['PrdCd', 'WeekStartDate', 'PreviousYearSalesActualQuantity', 'time_leap8', 'SalesAmount', 'baika_toitsu', 'BAIKA', 'DPT', 'line_cd', 'cls_cd', 'hnmk_cd', 'weekstartdatestamp', 'tenpo_cd', 'TenpoCdPrdCd']]
+
+        df_vx_test_colected_sales_value['NENSHUDO'] = today_nenshudo
+
+
+        if output_6wk_2sales:
+            df_vx_test_colected_sales_value['MODEL_TYPE'] = 'MEDIUM_QTY'
+        else:
+            df_vx_test_colected_sales_value['MODEL_TYPE'] = 'WEEKLY'
+        
+        print("df_vx_test3", df_vx_test_colected_sales_value)
         if output_collected_sales_value_test_table == True:
             table_id = "dev-cainz-demandforecast.cainz_shortterm_predicted_value_for_statistics.corrected_sales_values_all_218strdebug"    
         else:
@@ -2529,7 +2582,7 @@ def upload_collected_sales_data(df_vx_test, today_nenshudo, df_calendar, max_syu
             ],
             write_disposition='WRITE_APPEND',
         )
-        
+
         upload_complete = False
         while upload_complete == False:
             try:
@@ -2540,9 +2593,9 @@ def upload_collected_sales_data(df_vx_test, today_nenshudo, df_calendar, max_syu
                 upload_complete = True
 
             except Exception as e:
-                logger.info(f"errtype:, {str(type(e))}")
-                logger.info(f"err: , {str(e)}")
-                logger.info('data upload retry')
+                print('errtype:', str(type(e)))
+                print('err:', str(e))
+                print('data upload retry')
                 time.sleep(20)
 
 
@@ -2571,7 +2624,7 @@ def process_and_upload_seasonal_data(df_vx_test, tenpo_cd, start_week_from_ymd, 
         seasonal_prdcd_list = list(seasonal_prdcd_df['PrdCd'].astype(int))
 
         df_vx_test_seasonal = df_vx_test[df_vx_test['PrdCd'].isin(seasonal_prdcd_list)]
-        
+        print("df_vx_test6", df_vx_test_seasonal)
         # テストデータ期間に絞っている *********************************************************************
         df_vx_test_seasonal =  df_vx_test_seasonal[df_vx_test_seasonal['WeekStartDate'] >= start_week_from_ymd].reset_index(drop=True)
         df_vx_test_seasonal =  df_vx_test_seasonal[df_vx_test_seasonal['WeekStartDate'] <= end_week_from_ymd].reset_index(drop=True)
@@ -2581,7 +2634,7 @@ def process_and_upload_seasonal_data(df_vx_test, tenpo_cd, start_week_from_ymd, 
         
         table_id = "dev-cainz-demandforecast.short_term_cloudrunjobs." + "weekly-test-seasonal-" + str(today)  + str(OUTPUT_TABLE_SUFFIX)
 
-        
+        print("df_vx_test7", df_vx_test_seasonal)
         upload_complete = False
         while upload_complete == False:
             try:
@@ -2607,7 +2660,8 @@ def process_and_upload_seasonal_data(df_vx_test, tenpo_cd, start_week_from_ymd, 
 
 def process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_ymd, target_week_from_ymd, OUTPUT_TABLE_SUFFIX, this_tenpo_theme_md_prdcd_list, tenpo_cd):
     
-    if divide_by_salesamount_v2:             
+    if divide_by_salesamount_v2:     
+    
         def set_div_points(x, div_points):
             if x is None:
                 return 0
@@ -2618,89 +2672,85 @@ def process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_y
                 else:
                     return prev_dp
             return None
-        
+
         div_points = [0, 30, 999999]
-        
+
         if divide_by_salesamount_v3:
             div_points = [0, 10, 30, 999999]
-        
+
 
         if turn_back_time:
             # todayを巻き戻し日にする
             #today = datetime.datetime.now(JST)
-        
+
             today_turn_back = pd.to_datetime(today_date_str, format='%Y%m%d')
             #today_turn_back = datetime.date(today.year, today.month, today.day)
-            
+
             last13week_date = today_turn_back - datetime.timedelta(days=int(4.3*13)) - datetime.timedelta(days=7)
             last13week_date = pd.Timestamp(last13week_date)
             prev_week_date = today_turn_back - datetime.timedelta(days=7)
-            
-            
+
+
         else:
             last13week_date = today - datetime.timedelta(days=int(4.3*13)) - datetime.timedelta(days=7)
             last13week_date = pd.Timestamp(last13week_date)
             prev_week_date = today - datetime.timedelta(days=7)
-        
-        
+
+
         #df_vx_test_last13week = df_vx_test[df_vx_test['weekstartdatestamp'] >= last13week_date]
         df_vx_test_last13week = df_vx_test[(last13week_date <= df_vx_test['weekstartdatestamp'])&(df_vx_test['weekstartdatestamp'] < pd.Timestamp(prev_week_date))]
-        
+
         df_vx_test_last13week['URISU_AVE'] = df_vx_test_last13week.groupby("PrdCd",as_index=False)['SalesAmount'].transform(lambda x:x.mean())
         df_vx_test_last13week['DivPoint'] = df_vx_test_last13week['URISU_AVE'].apply(lambda x:set_div_points(x, div_points))
-        
+
         #df_vx_test_last13week.to_csv('df_vx_test_last13week.csv')
-        
+
         df_vx_test_last13week = df_vx_test_last13week[['PrdCd', 'URISU_AVE', 'DivPoint']].drop_duplicates().reset_index(drop=True)
         df_vx_test = pd.merge(df_vx_test, df_vx_test_last13week, on='PrdCd', how='left').reset_index(drop=True)
-        
+
         #df_vx_test.to_csv('df_vx_test.csv')
         
-        
+        print("df_vx_test9", df_vx_test) 
         # テストデータ期間に絞っている *********************************************************************
         df_vx_test =  df_vx_test[df_vx_test['WeekStartDate'] >= start_week_from_ymd].reset_index(drop=True)
         df_vx_test =  df_vx_test[df_vx_test['WeekStartDate'] <= end_week_from_ymd].reset_index(drop=True)
         df_vx_test['SalesAmount'][df_vx_test['WeekStartDate'] >= target_week_from_ymd] = np.nan
         # ******************************************************************************************************
         df_vx_test = df_vx_test.drop('WeekStartDate', axis=1)
-
+        print("df_vx_test10", df_vx_test) 
         prediction_table_name_list = []
         for dp in div_points:
             if dp != div_points[-1]:# 分割店リストの最後の要素は反映されていないのでスキップする        
-                df_vx_test_tmp = df_vx_test[df_vx_test['DivPoint']==dp]       
-        
+                df_vx_test_tmp = df_vx_test[df_vx_test['DivPoint']==dp] 
+                print(f"dp........{dp}")
+                print("df_vx_test11", df_vx_test_tmp) 
                 table_id = "dev-cainz-demandforecast.short_term_cloudrunjobs." + "weekly-test-" + str(today)  + str(OUTPUT_TABLE_SUFFIX) + '-' + str(dp) + 'div'
-                
+
                 prediction_table_name_list.append("weekly-test-" + str(today)  + str(OUTPUT_TABLE_SUFFIX) + '-' + str(dp) + 'div')
-                
-                # Drop the redundant columns
-                df_vx_test_tmp.drop(['line_cd', 'cls_cd', 'hnmk_cd'], axis=1, inplace=True)
-                
+
                 if len(df_vx_test_tmp):
                     upload_complete = False
                     while upload_complete == False:
-                        #try:    
-                        client = BigqueryClient()
-                        logger.info(f"df_vx_test_tmp {df_vx_test_tmp}")
-                        logger.info(f"table_id {table_id}")
-                        job = client.load_table_from_dataframe(df_vx_test_tmp, table_id)
-                        job.result()
+                        try:    
+                            client = BigqueryClient()
+                            job = client.load_table_from_dataframe(df_vx_test_tmp, table_id)
+                            job.result()
 
-                        logger.info("==data-uploaded-bq===")
+                            print("==data-uploaded-bq===")
 
-                        end_t = time.time()
-                        elapsed_time = end_t - start_t
-                        logger.info(f"Elapsed time: {elapsed_time:.3f} seconds")
-                        upload_complete = True
+                            end_t = time.time()
+                            elapsed_time = end_t - start_t
+                            print(f"Elapsed time: {elapsed_time:.3f} seconds")
+                            upload_complete = True
 
-                        # except:
-                        #     logger.info('data upload retry')
-                        #     time.sleep(20)
-                            
-                            
+                        except:
+                            print('data upload retry')
+                            time.sleep(20)
+
+
         prediction_table_name_small = prediction_table_name_list[0]
         prediction_table_name_large = prediction_table_name_list[1]
-        
+
     else:
         if THEME_MD_MODE: 
             # テストデータ期間に絞っている *********************************************************************
@@ -2709,7 +2759,7 @@ def process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_y
             df_vx_test['SalesAmount'][df_vx_test['WeekStartDate'] >= target_week_from_ymd] = np.nan
             # ******************************************************************************************************
             df_vx_test = df_vx_test.drop('WeekStartDate', axis=1)
-            
+
             if 1:
                 df_vx_test['theme_md_div'] = 0
                 df_vx_test['theme_md_div'][df_vx_test['PrdCd'].isin(this_tenpo_theme_md_prdcd_list)] = 1
@@ -2721,10 +2771,10 @@ def process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_y
 
                 df_vx_test = df_vx_test.drop('店番', axis=1)
                 df_vx_test = df_vx_test.drop('JANコード', axis=1)
-            
+
 
         prediction_table_name = "weekly-test-" + str(today)  + str(OUTPUT_TABLE_SUFFIX)
-        
+
         if add_reference_store_unitedmodel:
             table_id = "dev-cainz-demandforecast.short_term_cloudrunjobs." + "weekly-test-" + str(today)  + str(OUTPUT_TABLE_SUFFIX)
         else:
@@ -2732,30 +2782,30 @@ def process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_y
                 table_id = "dev-cainz-demandforecast.short_term_cloudrunjobs." + "weekly-test-" + str(today)  + str(OUTPUT_TABLE_SUFFIX)
             else:
                 table_id = "dev-cainz-demandforecast.short_term_cloudrunjobs." + "weekly-test-new-store-" + str(today)  + str(OUTPUT_TABLE_SUFFIX)
-                
-        if divide_by_salesamount_v2:
 
-            if len(df_vx_test) > 0:
-                upload_complete = False
-                while upload_complete == False:
-                    try:    
-                        client = BigqueryClient()
-                        job = client.load_table_from_dataframe(df_vx_test, table_id)
-                        job.result()
 
-                        logger.info("==data-uploaded-bq====")
+        if len(df_vx_test) > 0:
+            upload_complete = False
+            while upload_complete == False:
+                try:    
+                    client = BigqueryClient()
+                    job = client.load_table_from_dataframe(df_vx_test, table_id)
+                    job.result()
 
-                        end_t = time.time()
-                        elapsed_time = end_t - start_t
-                        logger.info(f"Elapsed time: {elapsed_time:.3f} seconds")
-                        upload_complete = True
+                    print("==data-uploaded-bq===")
 
-                    except:
-                        logger.info('data upload retry')
-                        time.sleep(20)
+                    end_t = time.time()
+                    elapsed_time = end_t - start_t
+                    print(f"Elapsed time: {elapsed_time:.3f} seconds")
+                    upload_complete = True
 
-            else:
-                logger.info(f"test data len=0 fin tenpo_cd:, {tenpo_cd}")
+                except:
+                    print('data upload retry')
+                    time.sleep(20)
+
+        else:
+            print('test data len=0 fin tenpo_cd:', tenpo_cd)
+
     return df_vx_test, prediction_table_name_small, prediction_table_name_large
     
 #####################
@@ -4109,49 +4159,12 @@ if cloudrunjob_mode and CALL_NEXT_PIPELINE:
 #######################start initialization                                   
 def main():
     tenpo_cd_ref = None
-    path_tran_ref = None
-    
-    if cloudrunjob_mode:
-        OUTPUT_TABLE_SUFFIX = os.environ.get("OUTPUT_TABLE_SUFFIX", "")
-        tenpo_cd = tenpo_cd_list[TASK_INDEX]
-        logger.info(f'TASK_INDEX: {TASK_INDEX}, tenpo_cd: {tenpo_cd}')
-    else:
-        tenpo_cd = sys.argv[1]
-        OUTPUT_TABLE_SUFFIX = '_suzuki_ukeire_test_pipinstalled'
-        
-        
-    print('output_6wk_2sales:', output_6wk_2sales)
-    print('')
-    
-    #TODAY_OFFSET = 2
-    
-    print(f'TODAY_OFFSET: {TODAY_OFFSET}')
-    #OUTPUT_TABLE_SUFFIX = '_suzuki_ukeire_test'
-    print(f'OUTPUT_TABLE_SUFFIX: {OUTPUT_TABLE_SUFFIX}')
-    #OUTPUT_COLLECTED_SALES_VALUE = 0
-    print(f'OUTPUT_COLLECTED_SALES_VALUE: {OUTPUT_COLLECTED_SALES_VALUE}')
-    #OUTPUT_METRICS_VALUE = 1
-    print(f'OUTPUT_METRICS_VALUE: {OUTPUT_METRICS_VALUE}')
-    #SEASONAL_TRAINDATA_TABLE = ''  # Set appropriately
-    #logger.info(f'SEASONAL_TRAINDATA_TABLE: {SEASONAL_TRAINDATA_TABLE}')
-    #TURN_BACK_YYYYMMDD = ''  # Set appropriately, e.g. '20241022'
-    #logger.info(f'TURN_BACK_YYYYMMDD: {TURN_BACK_YYYYMMDD}')
-    #THEME_MD_MODE = 0
-    #logger.info(f'THEME_MD_MODE: {THEME_MD_MODE}')
-    
-    #print('main sysexit')
-    #sys.exit()
-    
-    
-    if season_flag:
-        with open('input_data/00_config_season.yaml') as file:
-            config = yaml.safe_load(file.read())
-    else:
-        with open('input_data/00_config_not_season.yaml') as file:
-            config = yaml.safe_load(file.read())
-                
-    #dfc = common.extract_as_df(path_week_master)
-    dfc = extract_as_df(path_week_master)
+    path_tran_ref = None 
+    # OUTPUT_TABLE_SUFFIX = os.environ.get("OUTPUT_TABLE_SUFFIX", "")
+    # tenpo_cd = tenpo_cd_list[TASK_INDEX]
+    logger.info(f'TASK_INDEX: {TASK_INDEX}, tenpo_cd: {tenpo_cd}')                
+    dfc = common.extract_as_df(path_week_master, bucket_name)
+    #dfc = extract_as_df(path_week_master)
         
     df_calendar = extract_as_df_with_encoding("Basic_Analysis_utf8/01_Data/10_週番マスタ/10_週番マスタ.csv", "utf-8")
 
@@ -4185,17 +4198,18 @@ def main():
         reference_store_df["OPEN_DATE"] = pd.to_datetime(reference_store_df["OPEN_DATE"], errors='coerce')
         reference_store_df["OPEN_DATE_REF"] = pd.to_datetime(reference_store_df["OPEN_DATE_REF"], errors='coerce')
 
-        newstore_refstore_dict = dict(zip(reference_store_df['STORE'], reference_store_df['STORE_REF']))
-        tenpo_cd_ref = newstore_refstore_dict.get(tenpo_cd)  # Use .get() to avoid KeyError
-        tenpo_cd_ref = newstore_refstore_dict.get(tenpo_cd)  # Use .get() to avoid KeyError
-        # 参照店舗の有無をチェックして、あればpath_tran_refを設定する
-        tenpo_cd_ref = newstore_refstore_dict.get(tenpo_cd)  # Use .get() to avoid KeyError
+    newstore_refstore_dict = dict(zip(reference_store_df['STORE'], reference_store_df['STORE_REF']))
+    newstore_opendate_dict = dict(zip(reference_store_df['STORE'], reference_store_df['OPEN_DATE']))
+    
+    # 参照店舗の有無をチェックして、あればpath_tran_refを設定する
+    if tenpo_cd in newstore_refstore_dict:
+        tenpo_cd_ref = newstore_refstore_dict[tenpo_cd]
+        print('参照店舗:', tenpo_cd_ref)      
+        if output_6wk_2sales:
+            path_tran_ref = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-62/'+str(tenpo_cd_ref)+"/{}_{}_time_series.csv"
+        else:
+            path_tran_ref = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-6/'+str(tenpo_cd_ref)+"/{}_{}_time_series.csv"
 
-        if tenpo_cd_ref:
-            if output_6wk_2sales:
-                path_tran_ref = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-62/'+str(tenpo_cd_ref)+"/{}_{}_time_series.csv"
-            else:
-                path_tran_ref = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-6/'+str(tenpo_cd_ref)+"/{}_{}_time_series.csv"
 
         
         
@@ -4357,11 +4371,11 @@ def main():
     ############################Function 10
     df_vx_test = prepare_vx_test_data(sales_df_saved, tenpo_cd)
                 
-    
+    print("df_vx_test1", df_vx_test)
     ############################Function 11
     df_vx_test, kikaku_master, list_price_yoyaku, longs_df = process_kakaku_jizen_kichi_data(df_vx_test, tenpo_cd, target_week_from_ymd)
                 
-                
+    print("df_vx_test2", df_vx_test)            
     ############################Function 12
     upload_collected_sales_data(df_vx_test, today_nenshudo, df_calendar, max_syudo_dic)
                 
@@ -4391,13 +4405,15 @@ def main():
                 df_vx_test[my_flag_col_name][df_vx_test['PrdCd'].isin(my_salesup_prdcd_list)] = 1
                 
 
+    print("df_vx_test4", df_vx_test)
     ############################Function 13
     df_vx_test = process_and_upload_seasonal_data(df_vx_test, tenpo_cd, start_week_from_ymd, end_week_from_ymd, target_week_from_ymd, OUTPUT_TABLE_SUFFIX)
                 
-                
+    print("df_vx_test8", df_vx_test)            
     ############################Function 14
     df_vx_test, prediction_table_name_small, prediction_table_name_large = process_sales_data_division(df_vx_test, start_week_from_ymd, end_week_from_ymd, target_week_from_ymd, OUTPUT_TABLE_SUFFIX, this_tenpo_theme_md_prdcd_list, tenpo_cd)
-                
+    
+    print("df_vx_test12", df_vx_test)
     ############################Function 15
     manage_cloud_function_trigger(tenpo_cd, TASK_COUNT, prediction_table_name_large, prediction_table_name_small)
     
