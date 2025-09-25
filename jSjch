@@ -2,220 +2,292 @@ import pytest
 import pandas as pd
 import numpy as np
 from unittest.mock import patch, MagicMock
-from io import BytesIO
+from io import BytesIO, StringIO
 import datetime
 import sys
 import os
 
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from main import (
-    odas_correct,
-   calc_nenshudo, calc_nenshudo2,
-   load_sales_data, process_minmax_data,
-   restrict_tenpo_hacchu_end_func
+    get_chanceloss_data, create_case_pack_bara_groups, create_prdcd_hattyujan_df, calculate_prdcd_hcjan_coefficients, 
 )
 
 from repos.cainz_demand_forecast.cainz.common import common
-
-# For demonstration, assuming functions are directly accessible here.
-# Dummy CSV bytes helper
-def make_csv_bytes(df):
-    buffer = BytesIO()
-    df.to_csv(buffer, index=False)
-    buffer.seek(0)
-    return buffer.read()
+from repos.cainz_demand_forecast.cainz.short_term import short_term_preprocess_common
 
 @pytest.fixture
-def dummy_sales_df():
-    return pd.DataFrame({
-       "nenshudo": [202501, 202502, 202503],
-       "PRD_CD": [123, 123, 123],
-       "URI_SU": [10, np.nan, 20],
-       "TENPO_CD": [1, 1, 1],
-       "baika_toitsu": [0, 2, np.nan],
-       "BAIKA": [100, 101, 102],
-       "DPT": [5, 5, 5],
-       "line_cd": [10, 10, 10],
-       "cls_cd": [1, 1, 1],
-       "hnmk_cd": [1000, 1000, 1000]
+def sample_bigquery_result_df():
+   # Sample DataFrame roughly based on your logged output with few rows for testing
+   return pd.DataFrame({
+       'BUMON_CD': ['064', '064', '032'],
+       'TENPO_CD': ['0760', '0760', '0760'],
+       'PRD_NO': ['12000010007863', '15999964000042', '09000010246780'],
+       'NENSHUDO': [202530, 202530, 202530],
+       'PRD_CD': [4901777232310, 4901777235410, 4961010486054],
+       'KEPPIN_CNT': [1, 3, 4],
+       'CHANCE_LOSS_PRD_SU': [1.0, 1.0, 0.0],
+       'CHANCE_LOSS_KN': [132.0, 356.0, 0.0],
    })
 
 
-@pytest.fixture
-def dummy_calendar_df():
-    return pd.DataFrame({
-       "nenshudo": [202501, 202502, 202503],
-       "shudo": [1,2,3],
-       "week_from_ymd": [20250101, 20250108, 20250115],
-       "nendo": [2025, 2025, 2025],
-       "znen_nendo": [2024,2024,2024],
-       "znen_shudo": [51,52,1],
-       "minashi_tsuki": [1,2,3]
-   })
+
+@patch('main.bigquery.Client')  
+@patch('main.bigquery_storage_v1.BigQueryReadClient')  # patch BQ Storage client
+def test_get_chanceloss_data(mock_bq_storage_client, mock_bq_client, sample_bigquery_result_df):
+    # Setup the mock for the BigQuery client query().result().to_dataframe()
+    mock_query = MagicMock()
+    mock_query.result.return_value.to_dataframe.return_value = sample_bigquery_result_df
+    mock_bq_client_instance = mock_bq_client.return_value
+    mock_bq_client_instance.query.return_value = mock_query
+    project_id = 'dummy_project'
+    dataset_id = 'dev_cainz_nssol'
+    table_id = 'T_090_PRD_CHANCE_LOSS_NB_DPT'
+    tenpo_cd = 760
+    df_result = get_chanceloss_data(project_id, dataset_id, table_id, tenpo_cd)
+    # The query should zero-pad TENPO_CD to 4 digits
+    expected_query = f"  SELECT * FROM {dataset_id}.{table_id} where TENPO_CD = '0760'"
+    mock_bq_client_instance.query.assert_called_with(expected_query)
+    # Test if result DataFrame matches expected columns and dtypes
+    assert not df_result.empty
+    assert set(['PRD_CD', 'NENSHUDO', 'TENPO_CD', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']).issubset(df_result.columns)
+    # Verify dtypes are correct (int for coded columns, float for numeric)
+    assert df_result['PRD_CD'].dtype == int or str(df_result['PRD_CD'].dtype).startswith('int')
+    assert df_result['NENSHUDO'].dtype == int or str(df_result['NENSHUDO'].dtype).startswith('int')
+    assert df_result['TENPO_CD'].dtype == int or str(df_result['TENPO_CD'].dtype).startswith('int')
+    assert df_result['CHANCE_LOSS_PRD_SU'].dtype == float
+    assert df_result['CHANCE_LOSS_KN'].dtype == float
+    # Check that CHANCE_LOSS_KN is 0 where CHANCE_LOSS_PRD_SU is 0
+    zero_sl_rows = df_result['CHANCE_LOSS_PRD_SU'].astype(int) == 0
+    assert all(df_result.loc[zero_sl_rows, 'CHANCE_LOSS_KN'] == 0.0)
 
 
-@patch("google.cloud.storage.Client")
-def test_extract_as_df_with_encoding_valid(mock_storage_client):
-   # Prepare dummy CSV content
-    data = pd.DataFrame({"A": [1,2,3], "B": ["x","y","z"]})
-    csv_bytes = make_csv_bytes(data)
+
+def test_create_case_pack_bara_groups_large_sample():
+    # Simulated prd_asc DataFrame similar to printed one (minimal subset for test)
+    prd_asc = pd.DataFrame({
+       'prd_cd': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
+       'dpt': [77, 64, 64, 77, 77],
+       'prd_nm_kj': [
+           "＜長野＞Ｃよなよなエール　ビール　３５０缶×２４",
+           "Ｃアーモンドブリーズオリジナル１Ｌ×６本",
+           "Ｃアーモンドブリーズ砂糖不使用１Ｌ×６本",
+           "ブルームーン　３５５ｍｌ×６",
+           "Ｃブルームーン　３５５ｍｌ×２４"
+       ],
+       'baika_toitsu': [6580, 1750, 1750, 1968, 7850],
+       'hacchu_tani_toitsu_kosu': [1, 1, 1, 4, 1],
+       'daihyo_torihikisaki_cd': [926221, 762148, 762148, 987956, 926221],
+       'daihyo_torihikisaki_nm': [
+           '日本酒類販売（株）流通第三本部営業二部',
+           'マルサンアイ（株）　関信越支店',
+           'マルサンアイ（株）　関信越支店',
+           'ＰＯＳ　ＰＬＵ登録',
+           '日本酒類販売（株）流通第三本部営業二部'
+       ],
+       'asc_riyu_cd': [3, 3, 3, 3, 3],
+       'iri_su': [24, 6, 6, 6, 4],
+       'asc_prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
+       'asc_dpt': [77, 64, 64, 77, 77],
+       'asc_prd_nm_kj': [
+           'よなよなエール　３５０ｍｌ',
+           'アーモンドブリーズオリジナル１Ｌ',
+           'アーモンドブリーズ砂糖不使用１Ｌ',
+           'ブルームーン　３５５ｍｌ',
+           'ブルームーン　３５５ｍｌ×６'
+       ],
+       'asc_baika_toitsu': [278, 298, 298, 328, 1968],
+       'asc_hacchu_tani_toitsu_kosu': [24, 6, 6, 24, 4],
+       'asc_daihyo_torihikisaki_cd': [987956, 987956, 987956, 987956, 987956],
+       'asc_daihyo_torihikisaki_nm': [
+           'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録'
+       ]
+    })
+    # Simulated prd_asc_tmp DataFrame (minimal subset)
+    prd_asc_tmp = pd.DataFrame({
+       'PRD_CD': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
+       'ASC_PRD_CD': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116]
+    })
+    # Call the function
+    groups = create_case_pack_bara_groups(prd_asc, prd_asc_tmp)
+    # Check the groups contain expected parent and children sets
+    # Minimal assertion example (expand as needed)
+    group_sets = [set(g) for g in groups]
+    # Assert that each expected pair is found in one of the groups
+    assert any({47478640, 47478619}.issubset(g) for g in group_sets)
+    assert any({41570112366, 41570112359}.issubset(g) for g in group_sets)
+    assert any({41570112380, 41570112373}.issubset(g) for g in group_sets)
+    assert any({71990095116, 4902335060017, 71990095123}.issubset(g) for g in group_sets)
+    
+    
+    
+
+def test_create_prdcd_hattyujan_df_basic():
+    prd_asc = pd.DataFrame({
+       'prd_cd': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
+       'asc_riyu_cd': [3, 3, 3, 3, 3],
+       'asc_prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
+       'daihyo_torihikisaki_nm': [
+           '日本酒類販売（株）流通第三本部営業二部',
+           'マルサンアイ（株）　関信越支店',
+           'マルサンアイ（株）　関信越支店',
+           'ＰＯＳ　ＰＬＵ登録',
+           '日本酒類販売（株）流通第三本部営業二部'
+       ],
+       'asc_daihyo_torihikisaki_nm': [
+           '日本酒類販売（株）流通第三本部営業二部',
+           'ＰＯＳ　ＰＬＵ登録',
+           'マルサンアイ（株）　関信越支店',
+           'ＰＯＳ　ＰＬＵ登録',
+           '日本酒類販売（株）流通第三本部営業二部'
+       ]
+    })
+    groups = [
+       {47478640, 47478619},
+       {41570112366, 41570112359},
+       {41570112380, 41570112373},
+       {4902335060017, 71990095123, 71990095116}
+    ]
+    df_result = create_prdcd_hattyujan_df(prd_asc, groups)
+    # Confirm columns exist
+    assert set(['PRD_CD', 'HACCHU_JAN']).issubset(df_result.columns)
+    # Confirm output is not empty
+    assert len(df_result) > 0
+    # Confirm output rows have PRD_CD values not equal to HACCHU_JAN
+    assert all(df_result['PRD_CD'] != df_result['HACCHU_JAN'])
+
+
+
+
+def test_calculate_prdcd_hcjan_coefficients(monkeypatch):
+    # Sample prd_asc DataFrame similar to print sample
+    prd_asc = pd.DataFrame({
+       'prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
+       'asc_riyu_cd': [3, 3, 3, 3, 3],
+       'asc_prd_cd': [47478640, 41570112366, 41570112380, 71990095123, 71990095123],
+       'iri_su': [24, 6, 6, 6, 4],
+       'hacchu_tani_toitsu_kosu': [24, 6, 6, 24, 4]
+    })
+    # Sample prdcd_hattyujan_df DataFrame from print
+    prdcd_hattyujan_df = pd.DataFrame({
+       'PRD_CD': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
+       'HACCHU_JAN': [47478640, 41570112366, 41570112380, 71990095123, 71990095123]
+    })
+    # Patch sys.exit to raise exception for test flow control
+    import sys
+    def fake_exit():
+        raise Exception("Exit called")
+    monkeypatch.setattr(sys, "exit", fake_exit)
+    coeff_dict, coeff_log = calculate_prdcd_hcjan_coefficients(prd_asc, prdcd_hattyujan_df)
+    assert isinstance(coeff_dict, dict)
+    assert isinstance(coeff_log, list)
+    # Check some keys exist in coeff dict
+    for key in prdcd_hattyujan_df['PRD_CD']:
+        assert key in coeff_dict or key not in prd_asc['prd_cd'].values
+    # Check logs have expected structure
+    for log_entry in coeff_log:
+        assert isinstance(log_entry, list)
+        assert len(log_entry) >= 7
+        
+        
+@patch('main.storage.Client')
+def test_extract_as_df(mock_storage_client):
+    expected_df = pd.DataFrame({
+       'BUMON_CD': [84, 84, 84, 84, 84],
+       'PRD_CD': [4549509192435, 4511413407363, 4511413404164, 4549509190035, 4511413404386],
+       'TENPO_CD': [760, 760, 760, 760, 760],
+       'NENSHUDO': [202530, 202530, 202530, 202530, 202530],
+       'BAIKA': [98, 358, 398, 108, 438],
+       'URI_SU': [1, 1, 1, 4, 1],
+       'URI_KIN': [90, 332, 369, 400, 406]
+    })
+    # This is the key line: use StringIO, not splitlines!
+    csv_io = StringIO(expected_df.to_csv(index=False))
     mock_bucket = MagicMock()
     mock_blob = MagicMock()
-    mock_blob.download_as_bytes.return_value = csv_bytes
+    mock_blob.open.return_value.__enter__.return_value = csv_io
     mock_bucket.blob.return_value = mock_blob
     mock_storage_client.return_value.bucket.return_value = mock_bucket
-    # Call your function
-    df = common.extract_as_df_with_encoding("dummy.csv", "dummy-bucket", "utf-8")
-    assert isinstance(df, pd.DataFrame)
-    assert set(df.columns) == set(["A","B"])
-    assert len(df) == 3
-    
-    
-# def test_interpolate_df_basic(dummy_sales_df, dummy_calendar_df):
-#     result_df = interpolate_df(dummy_sales_df, dummy_calendar_df)
-#     assert "URI_SU" in result_df.columns
-#     # No NaNs in URI_SU after fillna
-#     assert not result_df["URI_SU"].isnull().any()
-#     # Interpolated baika_toitsu should no longer contain zeros at places replaced by nan then interpolated
-#     assert result_df["baika_toitsu"].dtype == float
-#    # Interpolated BAIKA should not have NaNs
-#     assert not result_df["BAIKA"].isnull().any()
-    
-    
-def test_calc_nenshudo_increment_decrement():
-    max_syudo_dic = {2024: 52, 2025: 52}
-   # Test normal increment
-    assert calc_nenshudo(202501, 1, max_syudo_dic) == 202502
-   # Test increment crossing max boundary
-    assert calc_nenshudo(202552, 1, max_syudo_dic) == 202601
-   # Test decrement normal
-    assert calc_nenshudo(202502, -1, max_syudo_dic) == 202501
-   # Test decrement crossing year boundary
-    assert calc_nenshudo(202501, -1, max_syudo_dic) == 202452
-    
-    
-    
-def test_calc_nenshudo2_offset(monkeypatch):
-   # Create dummy DataFrame for nenshudo list
-   dfc_tmp = pd.DataFrame({"nenshudo": [202501,202502,202503]})
-   # Normal offset
-   assert calc_nenshudo2(202501, 2, dfc_tmp) == 202503
-   # Offset out of range returns None
-   assert calc_nenshudo2(202503, 2, dfc_tmp) is None
-   # Nonexistent nenshudo returns None
-   assert calc_nenshudo2(999999, 1, dfc_tmp) is None
-    
-    
-@patch("demand_forecast.common.extract_as_df_with_encoding")
-def test_load_sales_data_basic(mock_extract):
-   # Mock sales csv data
-    dummy_data = pd.DataFrame({
-       "PRD_CD": [1,2,3],
-       "PRICE": [100,200,300]
-   })
-    mock_extract.return_value = dummy_data
-    dpt_list = [1,2]
+    # Import your function appropriately!
+    df = common.extract_as_df('dummy_path.csv', 'dev-cainz-demandforecast', encoding='utf-8', usecols=None)
+    pd.testing.assert_frame_equal(df.reset_index(drop=True), expected_df.reset_index(drop=True))
+
+
+
+@patch('main.storage.Client')
+def test_upload_timeseries_df(mock_storage_client):
+    # Setup sample DataFrames for the inputs
+    product_info_df = pd.DataFrame({
+       'PRD_CD': [1, 2, 3],
+       'missing_ratio': [0.1, 0.3, 0.05],
+       'term': [200, 100, 220],
+       'missing_ratio_13': [0.4, 0.6, 0.2],
+       'URISU_AVE13WK': [3, 1, 5]
+    })
+    unique_tenpo_df = pd.DataFrame({
+       'PRD_CD': [1, 2, 3, 4],
+       'TENPO_CD': [760, 760, 760, 760],
+       'cls_cd': [10, 20, 10, 20],
+       'line_cd': [100, 200, 100, 200],
+       'hnmk_cd': [1000, 2000, 1000, 2000],
+       'baika_toitsu': [1, 2, 1, 2],
+       'low_price_kbn': [0, 1, 0, 1],
+       'nenshudo': [202501, 202502, 202503, 202504],
+       'URI_SU': [10, 20, 30, 40],
+       'URI_KIN': [100, 200, 300, 400],
+       'BAIKA': [1000, 2000, 3000, 4000],
+       'prd_nm_kj': ['prod1', 'prod2', 'prod3', 'prod4'],
+       'sell_start_ymd': [20200101, 20200201, 20200301, 20200401]
+    })
+    tenpo_df = pd.DataFrame({
+       'TENPO_CD': [760],
+       'CHUSHA_KANO_DAISU': [5],
+       'OKUNAI_URIBA_MENSEKI': [50],
+       'OKUGAI_URIBA_MENSEKI': [25],
+       'SHIKICHI_MENSEKI': [20]
+    })
+    dpt = 69
+    tenpo = 760
+    threshold_missing_ratio = 0.2
+    threshold_timeseries_length = 180
+    path_upload_tmp_local = "/tmp/test_timeseries.csv"
+    path_upload_time_series_blob = "path/to/blob/{}_{}.csv"
+    path_upload_time_series_blob2 = "path/to/blob2/{}_{}.csv"
     bucket_name = "dummy_bucket"
-    tenpo_cd = 123
-    tenpo_cd_ref = None
-    today = "20250101"
-    path_tran = "{}/{}_monthly_series.csv"
-    df = load_sales_data(dpt_list, tenpo_cd, path_tran, bucket_name, tenpo_cd_ref, today, path_tran)
-   # Expect concatenated DataFrame for two departments, so length matches twice dummy_data length
-    assert len(df) == 6
-   # Columns contain PRD_CD as expected
-    assert "PRD_CD" in df.columns
-    
-    
-@patch("demand_forecast.common.extract_as_df_with_encoding")
-def test_load_sales_data_new_store_filtering(mock_extract):
-    # Mock target store data returns 5 rows with mixed PRD_CD
-    sales_data_target = pd.DataFrame({
-       "PRD_CD": [1,2,3,4,5],
-       "PRICE": [100,200,300,400,500]
-    })
-    # Mock reference store data returns PRD_CD subset
-    sales_data_ref = pd.DataFrame({
-       "PRD_CD": [1,3,5],
-       "PRICE": [10,20,30]
-    })
-    def side_effect(path, bucket, encoding="utf-8"):
-        if "ref" in path:
-            return sales_data_ref
-        return sales_data_target
-    mock_extract.side_effect = side_effect
-    dpt_list = [1]
-    bucket_name = "dummy_bucket"
-    tenpo_cd = 123
-    tenpo_cd_ref = 456
-    today = "20250101"
-    # path_tran for target store
-    path_tran = "{}/{}_monthly_series.csv"
-    # path_tran_ref for reference store (inject 'ref' keyword for side_effect)
-    path_tran_ref = "{}/ref_{}_monthly_series.csv"
-    df = load_sales_data(dpt_list, tenpo_cd, path_tran, bucket_name, tenpo_cd_ref, today, path_tran_ref)
-    # Should be filtered to only PRD_CD in reference store [1,3,5]
-    assert set(df["PRD_CD"].unique()) == set([1,3,5])
-    # TENPO_CD column should be set to tenpo_cd for all rows
-    assert (df["TENPO_CD"] == tenpo_cd).all()
-    
-    
-@patch("demand_forecast.common.extract_as_df_with_encoding")
-def test_process_minmax_data_basic(mock_extract):
-    # Create dummy minmax data with products some with zero min/max and some valid
-    minmax_data_1 = pd.DataFrame({
-       "PRD_CD": [1, 2, 3, 4],
-       "HOJU_MIN_SU": [10, 0, 5, 0],
-       "HOJU_MAX_SU": [20, 0, 15, 0],
-       "TOROKU_YMD": [20250101]*4,
-       "TOROKU_HMS": ["000000"]*4,
-       "NENSHUDO": [202501]*4,
-    })
-    # Mock CSV extract returns minmax_data when called
-    mock_extract.return_value = minmax_data_1
-    sales_df = pd.DataFrame({
-       "PRD_CD": [1, 2, 3, 4, 5],
-       "OTHER": [10,11,12,13,14]
-    })
-    restrict_minmax = True
-    dpt_list = [1]
-    tenpo_cd = "123"
-    bucket_name = "dummy_bucket"
-    time_log_list = []
-    df_out, no_minmax_df, minmax0_df, _ = process_minmax_data(restrict_minmax, dpt_list, tenpo_cd, bucket_name, sales_df, common.extract_as_df_with_encoding, time_log_list)
-    # Products without minmax (5) should appear in no_minmax_df
-    assert 5 in no_minmax_df['PRD_CD'].values
-    # Products with zero min/max (2 and 4) should appear in minmax0_df
-    assert 2 in minmax0_df['PRD_CD'].values
-    assert 4 in minmax0_df['PRD_CD'].values
-    # Resulting sales_df should only include products with valid minmax (1 and 3)
-    assert set(df_out['PRD_CD'].unique()) == {1, 3}
-    
-    
-@patch("demand_forecast.common.extract_as_df")
-def test_restrict_tenpo_hacchu_end_func(monkeypatch_extract):
-    # Mock order cutoff dataframe
-    cutoff_data = pd.DataFrame({
-       "TENPO_CD": [123, 123, 123],
-       "PRD_CD": [1, 2, 3],
-       "HACCHU_TO_YMD": [20240101, 20250101, 20260101]  # Only product 1 and 2 cutoff <= my_date
-    })
-    monkeypatch_extract.return_value = cutoff_data
-    sales_df = pd.DataFrame({
-       "PRD_CD": [1, 2, 3, 4],
-       "PRICE": [100, 200, 300, 400]
-    })
-    restrinct_tenpo_hacchu_end = True
-    tenpo_cd = 123
-    bucket_name = "dummy_bucket"
-    my_date = 20250101
-    time_log_list = []
-    df_filtered, hacchu_prd_df, _ = restrict_tenpo_hacchu_end_func(restrinct_tenpo_hacchu_end, tenpo_cd, bucket_name, sales_df, my_date, common.extract_as_df, time_log_list)
-    # Sales df should exclude product 1 and 2 because cutoff date <= my_date
-    assert 1 not in df_filtered['PRD_CD'].values
-    assert 2 not in df_filtered['PRD_CD'].values
-    # Product 3 and 4 should remain
-    assert set(df_filtered['PRD_CD']) == {3,4}
-    # Check that hacchu_prd_df has correct reason column
-    assert all(hacchu_prd_df['reason'] == 'hacchu_teishi')
+    output_6wk_2sales = True
+    # Mock blob upload
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+    mock_bucket.blob.return_value = mock_blob
+    mock_storage_client.return_value.bucket.return_value = mock_bucket
+    # Call the function
+    time_series_prod_cd, time_series_df = short_term_preprocess_common.upload_timeseries_df(
+       product_info_df,
+       unique_tenpo_df,
+       tenpo_df,
+       dpt,
+       tenpo,
+       threshold_missing_ratio,
+       threshold_timeseries_length,
+       path_upload_tmp_local,
+       path_upload_time_series_blob,
+       path_upload_time_series_blob2,
+       bucket_name,
+       output_6wk_2sales
+    )
+    # Assertions on the output
+    # The product codes filtered should respect threshold conditions
+    assert all(product_info_df.loc[product_info_df['PRD_CD'].isin(time_series_prod_cd), 'missing_ratio'] <= threshold_missing_ratio)
+    assert all(product_info_df.loc[product_info_df['PRD_CD'].isin(time_series_prod_cd), 'term'] >= threshold_timeseries_length)
+    # The time_series_df columns should include expected columns
+    expected_columns = [
+       'PRD_CD', 'TENPO_CD', 'cls_cd', 'line_cd', 'hnmk_cd', 'baika_toitsu',
+       'low_price_kbn', 'nenshudo', 'URI_SU','URI_KIN','BAIKA',
+       'prd_nm_kj', 'sell_start_ymd',
+       'CHUSHA_KANO_DAISU', 'OKUNAI_URIBA_MENSEKI', 'OKUGAI_URIBA_MENSEKI', 'SHIKICHI_MENSEKI'
+    ]
+    for col in expected_columns:
+        assert col in time_series_df.columns
+    # Validate that upload_from_filename was called twice (due to output_6wk_2sales=True)
+    assert mock_blob.upload_from_filename.call_count == 2
