@@ -1,3783 +1,1516 @@
-print("AMOL")
-
-
-
-#######Final_Version
-
-import pytest
-from unittest.mock import patch, MagicMock
-from io import StringIO
-import sys
-import os
-import pandas as pd
-
-patcher = patch("google.cloud.storage.Client", return_value=MagicMock())
-patcher.start()
-# Ensure relative imports work
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-# Import application code AFTER patching storage.Client
-from main import (
-   get_chanceloss_data, create_case_pack_bara_groups, create_prdcd_hattyujan_df, calculate_prdcd_hcjan_coefficients,
-)
-from repos.cainz_demand_forecast.cainz.common import common
-from repos.cainz_demand_forecast.cainz.short_term import short_term_preprocess_common
-@pytest.fixture
-def sample_bigquery_result_df():
-   return pd.DataFrame({
-       'BUMON_CD': ['064', '064', '032'],
-       'TENPO_CD': ['0760', '0760', '0760'],
-       'PRD_NO': ['12000010007863', '15999964000042', '09000010246780'],
-       'NENSHUDO': [202530, 202530, 202530],
-       'PRD_CD': [4901777232310, 4901777235410, 4961010486054],
-       'KEPPIN_CNT': [1, 3, 4],
-       'CHANCE_LOSS_PRD_SU': [1.0, 1.0, 0.0],
-       'CHANCE_LOSS_KN': [132.0, 356.0, 0.0],
-   })
-@patch('main.bigquery.Client')
-@patch('main.bigquery_storage_v1.BigQueryReadClient')
-def test_get_chanceloss_data(mock_bq_storage_client, mock_bq_client, sample_bigquery_result_df):
-   mock_query = MagicMock()
-   mock_query.result.return_value.to_dataframe.return_value = sample_bigquery_result_df
-   mock_bq_client_instance = mock_bq_client.return_value
-   mock_bq_client_instance.query.return_value = mock_query
-   df_result = get_chanceloss_data('dummy_project', 'dev_cainz_nssol', 'T_090_PRD_CHANCE_LOSS_NB_DPT', 760)
-   expected_query = "  SELECT * FROM dev_cainz_nssol.T_090_PRD_CHANCE_LOSS_NB_DPT where TENPO_CD = '0760'"
-   mock_bq_client_instance.query.assert_called_with(expected_query)
-   assert not df_result.empty
-   assert set(['PRD_CD', 'NENSHUDO', 'TENPO_CD', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']).issubset(df_result.columns)
-   assert df_result['CHANCE_LOSS_PRD_SU'].dtype == float
-   assert df_result['CHANCE_LOSS_KN'].dtype == float
-   zero_sl_rows = df_result['CHANCE_LOSS_PRD_SU'].astype(int) == 0
-   assert all(df_result.loc[zero_sl_rows, 'CHANCE_LOSS_KN'] == 0.0)
-def test_create_case_pack_bara_groups_large_sample():
-   prd_asc = pd.DataFrame({
-      'prd_cd': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
-      'dpt': [77, 64, 64, 77, 77],
-      'prd_nm_kj': [
-          "＜長野＞Ｃよなよなエール　ビール　３５０缶×２４",
-          "Ｃアーモンドブリーズオリジナル１Ｌ×６本",
-          "Ｃアーモンドブリーズ砂糖不使用１Ｌ×６本",
-          "ブルームーン　３５５ｍｌ×６",
-          "Ｃブルームーン　３５５ｍｌ×２４"
-      ],
-      'baika_toitsu': [6580, 1750, 1750, 1968, 7850],
-      'hacchu_tani_toitsu_kosu': [1, 1, 1, 4, 1],
-      'daihyo_torihikisaki_cd': [926221, 762148, 762148, 987956, 926221],
-      'daihyo_torihikisaki_nm': [
-          '日本酒類販売（株）流通第三本部営業二部',
-          'マルサンアイ（株）　関信越支店',
-          'マルサンアイ（株）　関信越支店',
-          'ＰＯＳ　ＰＬＵ登録',
-          '日本酒類販売（株）流通第三本部営業二部'
-      ],
-      'asc_riyu_cd': [3, 3, 3, 3, 3],
-      'iri_su': [24, 6, 6, 6, 4],
-      'asc_prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
-      'asc_dpt': [77, 64, 64, 77, 77],
-      'asc_prd_nm_kj': [
-          'よなよなエール　３５０ｍｌ',
-          'アーモンドブリーズオリジナル１Ｌ',
-          'アーモンドブリーズ砂糖不使用１Ｌ',
-          'ブルームーン　３５５ｍｌ',
-          'ブルームーン　３５５ｍｌ×６'
-      ],
-      'asc_baika_toitsu': [278, 298, 298, 328, 1968],
-      'asc_hacchu_tani_toitsu_kosu': [24, 6, 6, 24, 4],
-      'asc_daihyo_torihikisaki_cd': [987956, 987956, 987956, 987956, 987956],
-      'asc_daihyo_torihikisaki_nm': [
-          'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録', 'ＰＯＳ　ＰＬＵ登録'
-      ]
-   })
-   prd_asc_tmp = pd.DataFrame({
-      'PRD_CD': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
-      'ASC_PRD_CD': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116]
-   })
-   groups = create_case_pack_bara_groups(prd_asc, prd_asc_tmp)
-   group_sets = [set(g) for g in groups]
-   assert any({47478640, 47478619}.issubset(g) for g in group_sets)
-   assert any({41570112366, 41570112359}.issubset(g) for g in group_sets)
-   assert any({41570112380, 41570112373}.issubset(g) for g in group_sets)
-   assert any({71990095116, 4902335060017, 71990095123}.issubset(g) for g in group_sets)
-def test_create_prdcd_hattyujan_df_basic():
-   prd_asc = pd.DataFrame({
-      'prd_cd': [47478640, 41570112366, 41570112380, 71990095116, 71990095123],
-      'asc_riyu_cd': [3, 3, 3, 3, 3],
-      'asc_prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
-      'daihyo_torihikisaki_nm': [
-          '日本酒類販売（株）流通第三本部営業二部',
-          'マルサンアイ（株）　関信越支店',
-          'マルサンアイ（株）　関信越支店',
-          'ＰＯＳ　ＰＬＵ登録',
-          '日本酒類販売（株）流通第三本部営業二部'
-      ],
-      'asc_daihyo_torihikisaki_nm': [
-          '日本酒類販売（株）流通第三本部営業二部',
-          'ＰＯＳ　ＰＬＵ登録',
-          'マルサンアイ（株）　関信越支店',
-          'ＰＯＳ　ＰＬＵ登録',
-          '日本酒類販売（株）流通第三本部営業二部'
-      ]
-   })
-   groups = [
-      {47478640, 47478619},
-      {41570112366, 41570112359},
-      {41570112380, 41570112373},
-      {4902335060017, 71990095123, 71990095116}
-   ]
-   df_result = create_prdcd_hattyujan_df(prd_asc, groups)
-   assert set(['PRD_CD', 'HACCHU_JAN']).issubset(df_result.columns)
-   assert len(df_result) > 0
-   assert all(df_result['PRD_CD'] != df_result['HACCHU_JAN'])
-def test_calculate_prdcd_hcjan_coefficients(monkeypatch):
-   prd_asc = pd.DataFrame({
-      'prd_cd': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
-      'asc_riyu_cd': [3, 3, 3, 3, 3],
-      'asc_prd_cd': [47478640, 41570112366, 41570112380, 71990095123, 71990095123],
-      'iri_su': [24, 6, 6, 6, 4],
-      'hacchu_tani_toitsu_kosu': [24, 6, 6, 24, 4]
-   })
-   prdcd_hattyujan_df = pd.DataFrame({
-      'PRD_CD': [47478619, 41570112359, 41570112373, 4902335060017, 71990095116],
-      'HACCHU_JAN': [47478640, 41570112366, 41570112380, 71990095123, 71990095123]
-   })
-   def fake_exit():
-       raise Exception("Exit called")
-   monkeypatch.setattr(sys, "exit", fake_exit)
-   coeff_dict, coeff_log = calculate_prdcd_hcjan_coefficients(prd_asc, prdcd_hattyujan_df)
-   assert isinstance(coeff_dict, dict)
-   assert isinstance(coeff_log, list)
-   for key in prdcd_hattyujan_df['PRD_CD']:
-       assert key in coeff_dict or key not in prd_asc['prd_cd'].values
-   for log_entry in coeff_log:
-       assert isinstance(log_entry, list)
-       assert len(log_entry) >= 7
-@patch('main.storage.Client')
-def test_extract_as_df(mock_storage_client):
-   expected_df = pd.DataFrame({
-      'BUMON_CD': [84, 84, 84, 84, 84],
-      'PRD_CD': [4549509192435, 4511413407363, 4511413404164, 4549509190035, 4511413404386],
-      'TENPO_CD': [760, 760, 760, 760, 760],
-      'NENSHUDO': [202530, 202530, 202530, 202530, 202530],
-      'BAIKA': [98, 358, 398, 108, 438],
-      'URI_SU': [1, 1, 1, 4, 1],
-      'URI_KIN': [90, 332, 369, 400, 406]
-   })
-   csv_io = StringIO(expected_df.to_csv(index=False))
-   mock_bucket = MagicMock()
-   mock_blob = MagicMock()
-   mock_blob.open.return_value.__enter__.return_value = csv_io
-   mock_bucket.blob.return_value = mock_blob
-   mock_storage_client.return_value.bucket.return_value = mock_bucket
-   df = common.extract_as_df('dummy_path.csv', 'dev-cainz-demandforecast', encoding='utf-8', usecols=None)
-   pd.testing.assert_frame_equal(df.reset_index(drop=True), expected_df.reset_index(drop=True))
-@patch('main.storage.Client')
-def test_upload_timeseries_df(mock_storage_client):
-   product_info_df = pd.DataFrame({
-      'PRD_CD': [1, 2, 3],
-      'missing_ratio': [0.1, 0.3, 0.05],
-      'term': [200, 100, 220],
-      'missing_ratio_13': [0.4, 0.6, 0.2],
-      'URISU_AVE13WK': [3, 1, 5]
-   })
-   unique_tenpo_df = pd.DataFrame({
-      'PRD_CD': [1, 2, 3, 4],
-      'TENPO_CD': [760, 760, 760, 760],
-      'cls_cd': [10, 20, 10, 20],
-      'line_cd': [100, 200, 100, 200],
-      'hnmk_cd': [1000, 2000, 1000, 2000],
-      'baika_toitsu': [1, 2, 1, 2],
-      'low_price_kbn': [0, 1, 0, 1],
-      'nenshudo': [202501, 202502, 202503, 202504],
-      'URI_SU': [10, 20, 30, 40],
-      'URI_KIN': [100, 200, 300, 400],
-      'BAIKA': [1000, 2000, 3000, 4000],
-      'prd_nm_kj': ['prod1', 'prod2', 'prod3', 'prod4'],
-      'sell_start_ymd': [20200101, 20200201, 20200301, 20200401]
-   })
-   tenpo_df = pd.DataFrame({
-      'TENPO_CD': [760],
-      'CHUSHA_KANO_DAISU': [5],
-      'OKUNAI_URIBA_MENSEKI': [50],
-      'OKUGAI_URIBA_MENSEKI': [25],
-      'SHIKICHI_MENSEKI': [20]
-   })
-   dpt = 69
-   tenpo = 760
-   threshold_missing_ratio = 0.2
-   threshold_timeseries_length = 180
-   path_upload_tmp_local = "/tmp/test_timeseries.csv"
-   path_upload_time_series_blob = "path/to/blob/{}_{}.csv"
-   path_upload_time_series_blob2 = "path/to/blob2/{}_{}.csv"
-   bucket_name = "dummy_bucket"
-   output_6wk_2sales = True
-   mock_bucket = MagicMock()
-   mock_blob = MagicMock()
-   mock_bucket.blob.return_value = mock_blob
-   mock_storage_client.return_value.bucket.return_value = mock_bucket
-   time_series_prod_cd, time_series_df = short_term_preprocess_common.upload_timeseries_df(
-      product_info_df,
-      unique_tenpo_df,
-      tenpo_df,
-      dpt,
-      tenpo,
-      threshold_missing_ratio,
-      threshold_timeseries_length,
-      path_upload_tmp_local,
-      path_upload_time_series_blob,
-      path_upload_time_series_blob2,
-      bucket_name,
-      output_6wk_2sales
-   )
-   assert all(product_info_df.loc[product_info_df['PRD_CD'].isin(time_series_prod_cd), 'missing_ratio'] <= threshold_missing_ratio)
-   assert all(product_info_df.loc[product_info_df['PRD_CD'].isin(time_series_prod_cd), 'term'] >= threshold_timeseries_length)
-   expected_columns = [
-      'PRD_CD', 'TENPO_CD', 'cls_cd', 'line_cd', 'hnmk_cd', 'baika_toitsu',
-      'low_price_kbn', 'nenshudo', 'URI_SU','URI_KIN','BAIKA',
-      'prd_nm_kj', 'sell_start_ymd',
-      'CHUSHA_KANO_DAISU', 'OKUNAI_URIBA_MENSEKI', 'OKUGAI_URIBA_MENSEKI', 'SHIKICHI_MENSEKI'
-   ]
-   for col in expected_columns:
-       assert col in time_series_df.columns
-   assert mock_blob.upload_from_filename.call_count == 2
-def teardown_module(module):
-   patcher.stop()
-
-
-
-
-
-
-
-
-from google.cloud import storage
-from pandas import read_csv
-import pandas as pd
-import numpy as np
-from typing import List, Optional
-import warnings
-import sys
-import datetime
-import time
-from datetime import timedelta
-from dateutil.relativedelta import relativedelta
-warnings.filterwarnings("ignore")
-import os
-import logging
-import copy
-import yaml
-import requests
-import google.auth
-import google.auth.transport.requests
-import google.oauth2.id_token
-#from google.cloud.bigquery import Client
-#from google.cloud import bigquery
-from google.cloud import bigquery
-from google.cloud import bigquery_storage_v1
-from repos.cainz_demand_forecast.cainz.common import common
-from repos.cainz_demand_forecast.cainz.short_term import short_term_preprocess_common
-from repos.cainz_demand_forecast.cainz.short_term.short_term_preprocess_common import get_newest_jan_list
-
-# Configure logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO) 
-handler = logging.StreamHandler(sys.stderr)
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-cloudrunjob_mode = True
-
-TASK_INDEX = int(os.environ.get("CLOUD_RUN_TASK_INDEX", 0))
-TASK_COUNT = int(os.environ.get("CLOUD_RUN_TASK_COUNT", 1))
-TODAY_OFFSET = int(os.environ.get("TODAY_OFFSET", 0))
-EXECUTE_STAGE2 = int(os.environ.get("EXECUTE_STAGE2", 0))
-OUTPUT_HACCHUJAN_INFO = int(os.environ.get("OUTPUT_HACCHUJAN_INFO", 0))
-OUTPUT_HACCHUJAN_TABLE_TEST = int(os.environ.get("OUTPUT_HACCHUJAN_TABLE_TEST", 0))
-OUTPUT_HACCHUJAN_INFO_GCS = int(os.environ.get("OUTPUT_HACCHUJAN_INFO_GCS",0))
-THEME_MD_MODE = int(os.environ.get("THEME_MD_MODE", 0))
-
-
-#################################
-# Old Code:  
-#print('TASK_INDEX:', TASK_INDEX)
-#print('TASK_COUNT:', TASK_COUNT)
-#print('TODAY_OFFSET:', TODAY_OFFSET)
-#print('EXECUTE_STAGE2:', EXECUTE_STAGE2)
-#print('OUTPUT_HACCHUJAN_INFO:', OUTPUT_HACCHUJAN_INFO)
-#print('OUTPUT_HACCHUJAN_TABLE_TEST:', OUTPUT_HACCHUJAN_TABLE_TEST)
-#print('OUTPUT_HACCHUJAN_INFO_GCS:', OUTPUT_HACCHUJAN_INFO_GCS)
-#print('THEME_MD_MODE:', THEME_MD_MODE)
-
-
-#################################
-# Refactored Code: 
-logger.info(f"TASK_INDEX: {TASK_INDEX}")
-logger.info(f"TASK_COUNT: {TASK_COUNT}")
-logger.info(f"TODAY_OFFSET: {TODAY_OFFSET}")
-logger.info(f"EXECUTE_STAGE2: {EXECUTE_STAGE2}")
-logger.info(f"OUTPUT_HACCHUJAN_INFO: {OUTPUT_HACCHUJAN_INFO}")
-logger.info(f"OUTPUT_HACCHUJAN_TABLE_TEST: {OUTPUT_HACCHUJAN_TABLE_TEST}")
-logger.info(f"OUTPUT_HACCHUJAN_INFO_GCS: {OUTPUT_HACCHUJAN_INFO_GCS}")
-logger.info(f"THEME_MD_MODE: {THEME_MD_MODE}")
-
-
-
-# 全店拡大20240926年末積み増し対応 239店舗(22店舗追加) + テーマMD（土鍋カセットボンベ　5店舗）　全244店舗　花王もこちらで
-tenpo_cd_list=[
-760, 814, 294, 836, 809, 753, 287, 845, 269, 281, 277, 766, 168, 292, 797, 807, 265, 738, 791, 792, 166, 288, 247, 730, 252, 755, 164, 804, 263, 289, 261, 793, 156, 273, 231, 835, 278, 286, 823, 825, 732, 763, 274, 822, 743, 843, 737, 828, 28, 96, 98, 102, 157, 242,    
-20, 31, 34, 47, 48, 67, 89, 120, 132, 133, 134, 135, 136, 139, 140, 143, 147, 151, 155, 158, 162, 165, 167, 230, 232, 233, 234, 236, 237, 238, 240, 243, 244, 246, 248, 249, 250, 251, 253, 254, 255, 256, 257, 258, 259, 262, 264, 266, 267, 268, 270, 271, 272, 275, 276, 279, 280, 282, 283, 284, 285, 290, 291, 293, 295, 296, 612, 664, 731, 733, 734, 735, 736, 739, 740, 742, 744, 745, 746, 747, 748, 749, 750, 751, 752, 754, 756, 757, 758, 759, 761, 762, 764, 765, 768, 769, 770, 771, 772, 773, 774, 775, 777, 778, 779, 790, 795, 796, 798, 800, 802, 803, 806, 810, 811, 813, 815, 816, 817, 818, 820, 821, 824, 826, 827, 829, 830, 831, 832, 833, 834, 837, 838, 839, 840, 844, 848, 851, 852, 853, 854, 855, 856, 857, 858, 859, 860, 861, 862, 865, 866, 867, 869, 871, 873, 
-874, 876, 877, 879, 900, 907, 902, 904, 
-50, 137, 154, 235, 613, 615, 617, 618, 623, 624, 741, 767, 794, 799, 808, 812, 842, 868, 875, 878, 903, 909,
-51,52,908,910,932,
-]
-
-
-# 全店拡大20250130 218店舗（古河は13週経過したので入れる）
-tenpo_cd_list=[
-760, 814, 294, 836, 809, 753, 287, 845, 269, 281, 277, 766, 168, 292, 797, 807, 265, 738, 791, 792, 166, 288, 247, 730, 252, 755, 164, 804, 263, 289, 261, 793, 156, 273, 231, 835, 278, 286, 823, 825, 732, 763, 274, 822, 743, 843, 737, 828, 28, 96, 98, 102, 157, 242,    
-20, 31, 34, 47, 48, 67, 89, 120, 132, 133, 134, 135, 136, 139, 140, 143, 147, 151, 155, 158, 162, 165, 167, 230, 232, 233, 234, 236, 237, 238, 240, 243, 244, 246, 248, 249, 250, 251, 253, 254, 255, 256, 257, 258, 259, 262, 264, 266, 267, 268, 270, 271, 272, 275, 276, 279, 280, 282, 283, 284, 285, 290, 291, 293, 295, 296, 612, 664, 731, 733, 734, 735, 736, 739, 740, 742, 744, 745, 746, 747, 748, 749, 750, 751, 752, 754, 756, 757, 758, 759, 761, 762, 764, 765, 768, 769, 770, 771, 772, 773, 774, 775, 777, 778, 779, 790, 795, 796, 798, 800, 802, 803, 806, 810, 811, 813, 815, 816, 817, 818, 820, 821, 824, 826, 827, 829, 830, 831, 832, 833, 834, 837, 838, 839, 840, 844, 848, 851, 852, 853, 854, 855, 856, 857, 858, 859, 860, 861, 862, 865, 866, 867, 869, 871, 873, 
-874, 876, 877, 879, 900, 907, 902, 904, 910
-]
-
- # 93を追加 20240304
-dpt_list = [69, 97, 14, 37, 27, 39, 28, 74, 33, 30, 36, 75, 85, 80, 20, 22, 55, 72, 15, 62, 32, 77, 84, 89, 23, 60, 25, 87, 68, 56, 92, 61, 2, 40, 86, 88, 26, 17, 24, 34, 52, 64, 73, 21, 35, 58, 83, 94, 63, 38, 18, 29, 19, 31, 53, 45, 50, 81, 82, 90, 91, 54, 95, 93]
-
-storage_client = storage.Client()
-bucket_name = "dev-cainz-demandforecast"
-bucket = storage_client.bucket(bucket_name)
-prefix = 'vertex_pipelines/pipeline/pipeline_shortterm1/check_stage1_complete/completed_'
-blobs = list(storage_client.list_blobs(bucket, prefix=prefix))
-PROJECT_ID = "dev-cainz-demandforecast"
-DATASET_ID = 'dev_cainz_nssol'
-TEMP_TABLE_PREFIX = 'temp_M_090_PRD_NB_STD'
-path_target_prd_master = "Basic_Analysis_unzip_result/01_Data/92_ADD_DATA_adhoc/kaou_prd_master.csv"
-
-# DEFAULT_TODAY_OFFSET = 0
-# DEFAULT_TASK_COUNT = 0
-# DEFAULT_EXECUTE_STAGE2 = 0
-# DEFAULT_OUTPUT_HACCHUJAN_INFO = 0
-# DEFAULT_OUTPUT_HACCHUJAN_TABLE_TEST = 0
-# DEFAULT_OUTPUT_HACCHUJAN_INFO_GCS = 1
-# DEFAULT_THEME_MD_MODE = 0
-
-CONFIG_SEASON_FILE = '00_config_season.yaml'
-CONFIG_NOT_SEASON_FILE = '00_config_not_season.yaml'
-DEFAULT_START_HOLDOUT_NENSHUDO = 202127
-DEFAULT_START_NENSHUDO = 201701
-
-STAGE2_WEEKLY_URL ='https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-weekly'
-STAGE2_MONTHLY_URL = 'https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-monthly'
-STAGE2_MIDIUM_URL ='https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-midium'
-
-tenpo_cd = tenpo_cd_list[TASK_INDEX]
-
-#################################
-# Old Code:  
-# if cloudrunjob_mode:
-#     tenpo_cd = tenpo_cd_list[TASK_INDEX]
-    
-#     #print('TASK_INDEX:', TASK_INDEX, 'tenpo_cd:', tenpo_cd)
-#     logger.info(f"TASK_INDEX: {TASK_INDEX}, tenpo_cd: {tenpo_cd}")
-    
-#     if (TASK_INDEX == 0) and (EXECUTE_STAGE2 == 1):
-#         # stage1完了チェックフォルダ配下のファイル削除
-#         for blob in blobs:
-#             #print(blob.name)
-#             logger.info(blob.name)
-#             generation_match_precondition = None
-#             blob.reload()  # Fetch blob metadata to use in generation_match_precondition.
-#             generation_match_precondition = blob.generation
-#             blob.delete(if_generation_match=generation_match_precondition)
-#             #print(f"Blob {blob.name} deleted.")
-#             logger.info(f"Blob {blob.name} deleted.")
-    
-# else:
-#     # notebookで動かすモード
-#     tenpo_cd = int(sys.argv[1])
-#     #print('tenpo_cd:', tenpo_cd)
-#     logger.info(F"tenpo_cd: {tenpo_cd})
-#     TODAY_OFFSET = 0
-#     #print('TODAY_OFFSET:', TODAY_OFFSET) 
-#     logger.info(f"TODAY_OFFSET: {TODAY_OFFSET}
-#     TASK_COUNT = 0
-#     #print('TASK_COUNT:', TASK_COUNT)
-#     logger.info(f"TASK_COUNT: {TASK_COUNT})
-    
-#     EXECUTE_STAGE2 = 0
-#     #print('EXECUTE_STAGE2:', EXECUTE_STAGE2)
-#     logger.info(f"EXECUTE_STAGE2: {EXECUTE_STAGE2})
-#     OUTPUT_HACCHUJAN_INFO = 0
-#     #print('OUTPUT_HACCHUJAN_INFO:', OUTPUT_HACCHUJAN_INFO)
-#     info.logging(f"OUTPUT_HACCHUJAN_INFO: {OUTPUT_HACCHUJAN_INFO})
-#     OUTPUT_HACCHUJAN_TABLE_TEST = 0
-#     #print('OUTPUT_HACCHUJAN_TABLE_TEST:', OUTPUT_HACCHUJAN_TABLE_TEST)
-#     logger.info(f"OUTPUT_HACCHUJAN_TABLE_TEST: {OUTPUT_HACCHUJAN_TABLE_TEST})
-#     OUTPUT_HACCHUJAN_INFO_GCS = 1
-#     #print('OUTPUT_HACCHUJAN_INFO_GCS:', OUTPUT_HACCHUJAN_INFO_GCS)
-#     logger.info(f"OUTPUT_HACCHUJAN_INFO_GCS: {OUTPUT_HACCHUJAN_INFO_GCS})
-#     THEME_MD_MODE = 0
-#     #print('THEME_MD_MODE:', THEME_MD_MODE)
-#     logger.info(f"THEME_MD_MODE: {THEME_MD_MODE})
-
-  
-    
-#################################
-# Refactored Code:                          
-def clear_stage1_complete_files(storage_client, bucket):
-    """Clears files in the stage1 completion check folder."""
-    for blob in blobs:
-        logger.info(f"Deleting blob: {blob.name}")
-        try:
-            generation_match_precondition = blob.generation
-            blob.delete(if_generation_match=generation_match_precondition)
-            logger.info(f"Blob {blob.name} deleted.")
-        except Exception as e:
-            logger.error(f"Error deleting blob {blob.name}: {e}")
-
-
-
-#################################
-# Old Code:
-# dirpath = sys.path.append(os.path.join(os.path.dirname("__file__"), '/home/jovyan/work/playground/nagano/lib'))
-# # sys.path.append("../../cainz/")
-# sys.path.append("repos/cainz_demand-forecast/cainz")
-
-# pd.set_option("display.max_columns", None)
-# pd.set_option("display.max_rows", 100)
-
-# #tenpo_cd = sys.argv[1]
-
-# #print("===tenpo_cd===",tenpo_cd)
-# logger.info(f"===tenpo_cd=== {tenpo_cd})
-
-# path_week_master = "Basic_Analysis_unzip_result/01_Data/10_week_m/WEEK_MST.csv"
-# #path_bunrui = "Basic_Analysis_unzip_result/01_Data/90_ADD_DATA/M_090_BUNRUI.csv"
-# path_bunrui = "Basic_Analysis_unzip_result/01_Data/14_bunrui_m/06_M_090_BUNRUI.csv"
-
-# #path_tenpo_master = "Basic_Analysis_unzip_result/01_Data/03_tempo_m/TENPO_MST.csv"
-# path_tenpo_master = "Basic_Analysis_unzip_result/01_Data/03_tempo_m/02_M020TENPO.csv"
-
-# path_tenpo_hacchu_master = "Basic_Analysis_unzip_result/01_Data/33_tenpo_hacchu/29_TENPO_HACCHU_YMD.csv"
-
-# #path_selling_period = "Basic_Analysis_unzip_result/01_Data/90_ADD_DATA/HANBAI_KIKAN.csv"
-# path_selling_period = "Basic_Analysis_unzip_result/01_Data/17_hanbai_kikan/08_HANBAI_KIKAN.csv"
-# path_prd_asc = "Basic_Analysis_unzip_result/01_Data/16_case_pack_bara/07_M_090_PRD_ASC.csv"
-
-# #path_jan_master = 'Basic_Analysis_unzip_result/03_DSteam_create_data/jan_connect.csv'
-# #path_jan_master = '01_short_term/70_jan_connect/jan_connect.csv'
-# #path_jan_master = '01_short_term/70_jan_connect/jan_placed_809.csv'
-# path_jan_master = '01_short_term/70_jan_connect/jan_placed_'+str(tenpo_cd)+'.csv'
-# #path_tehme_md = "Basic_Analysis_unzip_result/01_Data/36_theme_md/theme_md_prd_store.csv"
-
-# path_bunrui_prd_code = "{}_各分類商品コード一覧.xlsx"
-# path_bunrui_prd_code_blob = "01_short_term/01_stage1_result/{}_各分類商品コード一覧.xlsx"
-
-# path_tenpo_dpt = "Basic_Analysis_unzip_result/02_DM/NBSales_shu_ten_prd_ten/NBSales_shu_ten_prd_{}/sales_{}_"
-
-# path_select_master = 'select_shop_master.csv'
-
-
-# path_prd_master_list = [
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000000.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000001.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000002.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000003.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000004.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000005.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000006.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000007.csv",
-#     "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000008.csv",
-# ]
-
-# #print('path_prd_master_list:')
-# #print(path_prd_master_list)
-# logger.info(f"path_prd_master_list: {path_prd_master_list})
-
-# path_tran_dir = "Basic_Analysis_unzip_result/02_DM/NBSales_shu_ten_prd/s"
-
-# path_upload_tmp_local_dir = "gcpアップロード一時データ"
-
-# # stage1の前日以前の日付（gcsのフォルダ名にも反映される）を使うフラグ
-# use_past_stage1_data_flag = True
-# past_days_num = int(TODAY_OFFSET)
-# t_delta = datetime.timedelta(hours=9)
-# JST = datetime.timezone(t_delta, 'JST')
-# if use_past_stage1_data_flag:
-#     today = datetime.datetime.now(JST) - timedelta(days=past_days_num)
-#     today_date_str = today.strftime('%Y-%m-%d')
-#     today = datetime.date(today.year, today.month, today.day)
-# else:
-#     today = datetime.datetime.now(JST)
-#     today_date_str = today.strftime('%Y-%m-%d')
-#     today = datetime.date(today.year, today.month, today.day)
-    
-# #print("******************* today ", today)
-# #print("******************* today_date_str ", today_date_str)
-# logger.info(f"today {today})
-# logger.info(f"today_date_str {today_date_str})
-
-# my_date = today.strftime('%Y%m%d')
-# my_date = int(my_date)
-# #print("******************* my_date ", my_date)
-# logger.info(f"******************* my_date {my_date})
-
- 
-
-#################################
-# Refactored Code:  
-# Append necessary paths to the system path
-dirpath = sys.path.append(os.path.join(os.path.dirname("__file__"), '/home/jovyan/work/playground/nagano/lib'))
-sys.path.append("repos/cainz_demand-forecast/cainz")
-
-# Set pandas display options
-pd.set_option("display.max_columns", None)
-pd.set_option("display.max_rows", 100)
-
-# Define file paths
-path_week_master = "Basic_Analysis_unzip_result/01_Data/10_week_m/WEEK_MST.csv"
-path_bunrui = "Basic_Analysis_unzip_result/01_Data/14_bunrui_m/06_M_090_BUNRUI.csv"
-path_tenpo_master = "Basic_Analysis_unzip_result/01_Data/03_tempo_m/02_M020TENPO.csv"
-path_tenpo_hacchu_master = "Basic_Analysis_unzip_result/01_Data/33_tenpo_hacchu/29_TENPO_HACCHU_YMD.csv"
-path_selling_period = "Basic_Analysis_unzip_result/01_Data/17_hanbai_kikan/08_HANBAI_KIKAN.csv"
-path_prd_asc = "Basic_Analysis_unzip_result/01_Data/16_case_pack_bara/07_M_090_PRD_ASC.csv"
-path_jan_master = '01_short_term/70_jan_connect/jan_placed_'+str(tenpo_cd)+'.csv'
-path_bunrui_prd_code = "{}_各分類商品コード一覧.xlsx"
-path_bunrui_prd_code_blob = "01_short_term/01_stage1_result/{}_各分類商品コード一覧.xlsx"
-path_tenpo_dpt = "Basic_Analysis_unzip_result/02_DM/NBSales_shu_ten_prd_ten/NBSales_shu_ten_prd_{}/sales_{}_"
-path_select_master = 'select_shop_master.csv'
-
-# Define list of product master paths
-path_prd_master_list = [
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000000.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000001.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000002.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000003.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000004.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000005.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000006.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000007.csv",
-    "Basic_Analysis_unzip_result/02_DM/M_090_PRD/M_090_PRD_NB_STD_000000000008.csv",
-]
-
-# Log the list of product master paths
-logger.info(f"path_prd_master_list: {path_prd_master_list}")
-
-# Define remaining paths and variables
-path_tran_dir = "Basic_Analysis_unzip_result/02_DM/NBSales_shu_ten_prd/s"
-path_upload_tmp_local_dir = "gcpアップロード一時データ"
-use_past_stage1_data_flag = True
-past_days_num = int(TODAY_OFFSET)
-t_delta = datetime.timedelta(hours=9)
-JST = datetime.timezone(t_delta, 'JST')
-
-# Determine today's date based on use_past_stage1_data_flag
-if use_past_stage1_data_flag:
-    today = datetime.datetime.now(JST) - timedelta(days=past_days_num)
-    today_date_str = today.strftime('%Y-%m-%d')
-    today = datetime.date(today.year, today.month, today.day)
-else:
-    today = datetime.datetime.now(JST)
-    today_date_str = today.strftime('%Y-%m-%d')
-    today = datetime.date(today.year, today.month, today.day)
-
-# Log today's date and date string
-logger.info(f"today {today}")
-logger.info(f"today_date_str {today_date_str}")
-
-# Format today's date
-my_date = today.strftime('%Y%m%d')
-my_date = int(my_date)
-
-# Log the formatted date
-logger.info(f"******************* my_date {my_date}")
-            
-       
-    
-# フラグ設定 **********************************************************************
-# JAN差し替え有無の指定
-use_jan_connect = True
-
-# JAN差し替えを、1世代前までに制限するフラグ
-restrict_old_jan_1generation_flag=True
-
-# 生産発注終了、店舗発注終了していない商品は、差替えないようにするフラグ
-seisan_tenpo_hattyuu_end_is_not_replaced = True
-
-# チャンスロス分を売上に加算する
-add_chanceloss_urisu = True
-
-# 発注JANへの紐づけ情報を出力する
-prdcd_hacchujan_df_flag = True
-
-# biqqueryのオプションを指定して売上データをロードする
-bq_allow_large_results = False
-
-# 生産発注停止を見ないようにする
-# short_term_preprocess_commonのrewrite_jan_code関数を直接修正
-
-# 中川さんから直近13週中6週実績あり、平均週販2以上の提案ありのデータを出力する
-output_6wk_2sales = True
-
-# *********************************************************************************
-# path_upload_time_series_blob = "01_short_term/01_stage1_result/01_weekly/"+str(today)+"/{}_{}_time_series.csv"
-# path_upload_monthly_series_blob = "01_short_term/01_stage1_result/02_monthly/"+str(today)+"/{}_{}_monthly_series.csv"
-# path_upload_not_ai_blob = "01_short_term/01_stage1_result/03_not_ai_target/"+str(today)+"/{}_{}_not_ai_model.csv"
-
-#exclusion_dpt_list = [2, 20, 26, 30, 33, 37, 39, 47, 48, 53, 57, 80, 98]
-exclusion_dpt_list = []
-
-#このリストは使っていない
-priority_dpt_list = [69,97,14,37,27,39,28,74,33,30,36,75,85,80,20,22,55,72,15,62,32,77,84,89,23,60,25,87,68,56,92,61,2,40,86,88,26,17,24,34,52,64,73,21,35,58,83,94,63,38,18,29,19,31,53,45,50,81,82,90,91,54,95]
-
-
-
-#################################
-# Old Code:
-# tenpo_list = []
-# #print("==tenpo_cd==",tenpo_cd)
-# logger.info(f"==tenpo_cd== {tenpo_cd})
-# tenpo_list.append(int(tenpo_cd))
-# #print("==tenpo_list==",tenpo_list)
-# logger.info(f"==tenpo_list== {tenpo_list})
-# #tenpo_cd = 813
-# path_upload_time_series_blob = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-# path_upload_time_series_blob2 = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-62/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-
-
-# path_upload_time_series_blob_all_prd = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-allprd/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-
-
-# path_upload_monthly_series_blob = "01_short_term/01_stage1_result/02_monthly/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_monthly_series.csv"
-
-# path_upload_not_ai_blob = "01_short_term/01_stage1_result/03_not_ai_target/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_not_ai_model.csv"
-
-# # train_end_nenshudo = 202152
-# # train_end_nenshudo = 202220
-            
-           
-# ## シーズン品に絞るかを指定
-# season_flag = False
-
-# if season_flag:
-#     with open('00_config_season.yaml') as file:
-#         config = yaml.safe_load(file.read())
-# else:
-#     with open('00_config_not_season.yaml') as file:
-#         config = yaml.safe_load(file.read())
-
-
-# start_holdout_nenshudo = 202127
-# #end_date = 20220301
-
-# start_nenshudo = 201701
-
-# # end_nenshudo = 202152
-# # end_nenshudo = 202220
-
-
-# if 0:
-#     end_date = int(datetime.date.today().strftime('%Y%m%d'))
-#     #print("==end_date===",end_date)
-#     logger.info(f"==end_date=== {end_date})
-#     end_date_str = datetime.date.today().strftime('%Y-%m-%d')
-# else:
-#     end_date = int(today.strftime('%Y%m%d'))
-#     #print("==end_date===",end_date)
-#     logger.info(f"==end_date=== {end_date})
-#     end_date_str = today.strftime('%Y-%m-%d')              
-        
-        
-    
-#################################
-# Old Code:
-# if THEME_MD_MODE:
-    
-#     '''
-#     theme_md_prdcd_list = []
-    
-#     if 1:
-#         # dev-cainz-demandforecast/Basic_Analysis_unzip_result/01_Data/92_ADD_DATA_adhoc
-#         path_target_prd_master = "Basic_Analysis_unzip_result/01_Data/92_ADD_DATA_adhoc/kaou_prd_master.csv"
-#         target_prd_masterdf = common.extract_as_df(path_target_prd_master, bucket_name)
-#         target_prd_masterdf['PRD_CD'] = target_prd_masterdf['PRD_CD'].astype(int)
-        
-#         theme_md_prdcd_list = target_prd_masterdf['PRD_CD'].unique().tolist()
-        
-#         #print('theme_md_prdcd_list:', theme_md_prdcd_list)
-#         logger.info(f"theme_md_prdcd_list: {theme_md_prdcd_list})
-
-    
-#     if 0:
-#         # 棚割りパターンコードから、テーマMDの店舗、商品コードを取得する
-#         tanawari_ptn_cd_list = [
-#             '094-990-187-02',
-#             '094-990-188-01',
-#             '094-990-189-01',
-#         ]
-        
-        
-#         path_ten_tana = "Basic_Analysis_unzip_result/01_Data/39_tanawari_ptn/30_T_090_TEN_TANA_PTN_SM.csv"
-#         ten_tana_df = common.extract_as_df(path_ten_tana, bucket_name)
-#         ten_tana_df['tenpo_cd'] = ten_tana_df['tenpo_cd'].astype(int)
-        
-#         path_tanaptn_dtl = "Basic_Analysis_unzip_result/01_Data/39_tanawari_ptn/30_T_090_TANA_PTN_DTL_SM.csv"
-#         tanaptn_dtl_df = common.extract_as_df(path_tanaptn_dtl, bucket_name)
-#         tanaptn_dtl_df['prd_cd'] = tanaptn_dtl_df['prd_cd'].astype(int)
-        
-#         theme_md_prdcd_list = []
-#         this_tenpo_theme_md_prdcd_list = []
-#         another_tenpo_theme_md_prdcd_list = []
-        
-#         # 各棚割りパターンCDをチェックする
-#         for my_tanawari_ptn_cd in tanawari_ptn_cd_list:
-#             #print('check tanawari_ptn_cd:', my_tanawari_ptn_cd)
-#             logger.info(f"check tanawari_ptn_cd: {check tanawari_ptn_cd})
-            
-#             # 棚割りパターンの店舗コードリスト
-#             my_tanawari_ptn_cd_tenpocd_list = ten_tana_df[ten_tana_df['tanawari_cd']==my_tanawari_ptn_cd]['tenpo_cd'].tolist()
-#             # 棚割りパターンの商品コードリスト
-#             my_tanawari_ptn_cd_prdcd_list = tanaptn_dtl_df[tanaptn_dtl_df['tanawari_cd']==my_tanawari_ptn_cd]['prd_cd'].tolist()
-            
-#             # この店舗は、棚割りパターン対象である
-#             if tenpo_cd in my_tanawari_ptn_cd_tenpocd_list:
-#                 if len(my_tanawari_ptn_cd_prdcd_list) > 0:
-#                     this_tenpo_theme_md_prdcd_list = this_tenpo_theme_md_prdcd_list + my_tanawari_ptn_cd_prdcd_list
-#             else:
-#                 if len(my_tanawari_ptn_cd_prdcd_list) > 0:
-#                     another_tenpo_theme_md_prdcd_list = another_tenpo_theme_md_prdcd_list + my_tanawari_ptn_cd_prdcd_list
-        
-        
-#         theme_md_prdcd_list = this_tenpo_theme_md_prdcd_list + another_tenpo_theme_md_prdcd_list
-#         #print('this_tenpo_theme_md_prdcd_list:', this_tenpo_theme_md_prdcd_list)
-#         #print('another_tenpo_theme_md_prdcd_list:', another_tenpo_theme_md_prdcd_list)
-#         #print('theme_md_prdcd_list:', theme_md_prdcd_list)
-#         logger.info('this_tenpo_theme_md_prdcd_list: %s', this_tenpo_theme_md_prdcd_list)
-#         logger.info('another_tenpo_theme_md_prdcd_list: %s', another_tenpo_theme_md_prdcd_list)
-#         logger.info('theme_md_prdcd_list: %s', theme_md_prdcd_list)
-
-#     '''
-
-            
-
-#################################
-# Refactored Code: 
-def extract_theme_md_product_codes(
-    bucket_name: str,
-    theme_md_mode: bool,
-    tenpo_cd: Optional[int] = None,  
-    tanawari_ptn_cd_list: Optional[List[str]] = None, ) -> List[int]:
-    """
-    Extracts theme merchandise product codes based on different modes.
-
-    Args:
-        bucket_name: The name of the Cloud Storage bucket.
-        theme_md_mode: A boolean flag to enable the theme MD mode.
-        tenpo_cd: (Optional) The store code. Required if using shelf allocation pattern mode.
-        tanawari_ptn_cd_list: (Optional) A list of shelf allocation pattern codes. Required if using shelf allocation pattern mode.
-
-    Returns:
-        A list of unique theme merchandise product codes.  Returns an empty list on error
-        or if the conditions are not met.
-    """
-
-    theme_md_prdcd_list: List[int] = []
-
-    if theme_md_mode:
-        if 1:  
-            try:
-                target_prd_masterdf = common.extract_as_df(path_target_prd_master, bucket_name)
-                target_prd_masterdf['PRD_CD'] = target_prd_masterdf['PRD_CD'].astype(int)
-                theme_md_prdcd_list = target_prd_masterdf['PRD_CD'].unique().tolist()
-                logger.info(f"theme_md_prdcd_list (from master): {theme_md_prdcd_list}")
-            except Exception as e:
-                logger.error(f"Error extracting from product master: {e}")
-                return []  # Return an empty list on error
-       
-        if 0:  
-            if tenpo_cd is None or tanawari_ptn_cd_list is None:
-                logger.warning("tenpo_cd and tanawari_ptn_cd_list are required for shelf allocation mode.")
-                return []  # Return an empty list if required parameters are missing
-
-            path_ten_tana = "Basic_Analysis_unzip_result/01_Data/39_tanawari_ptn/30_T_090_TEN_TANA_PTN_SM.csv"
-            path_tanaptn_dtl = "Basic_Analysis_unzip_result/01_Data/39_tanawari_ptn/30_T_090_TANA_PTN_DTL_SM.csv"
-
-            try:
-                ten_tana_df = common.extract_as_df(path_ten_tana, bucket_name)
-                tanaptn_dtl_df = common.extract_as_df(path_tanaptn_dtl, bucket_name)
-
-                ten_tana_df['tenpo_cd'] = ten_tana_df['tenpo_cd'].astype(int)
-                tanaptn_dtl_df['prd_cd'] = tanaptn_dtl_df['prd_cd'].astype(int)
-
-                this_tenpo_theme_md_prdcd_list: List[int] = []
-                another_tenpo_theme_md_prdcd_list: List[int] = []
-
-                for my_tanawari_ptn_cd in tanawari_ptn_cd_list:
-                    logger.info(f"check tanawari_ptn_cd: {my_tanawari_ptn_cd}")
-
-                    my_tanawari_ptn_cd_tenpocd_list = ten_tana_df[ten_tana_df['tanawari_cd'] == my_tanawari_ptn_cd]['tenpo_cd'].tolist()
-                    my_tanawari_ptn_cd_prdcd_list = tanaptn_dtl_df[tanaptn_dtl_df['tanawari_cd'] == my_tanawari_ptn_cd]['prd_cd'].tolist()
-
-                    if tenpo_cd in my_tanawari_ptn_cd_tenpocd_list:
-                        if my_tanawari_ptn_cd_prdcd_list:
-                            this_tenpo_theme_md_prdcd_list.extend(my_tanawari_ptn_cd_prdcd_list)
-                    else:
-                        if my_tanawari_ptn_cd_prdcd_list:
-                            another_tenpo_theme_md_prdcd_list.extend(my_tanawari_ptn_cd_prdcd_list)
-
-                theme_md_prdcd_list = this_tenpo_theme_md_prdcd_list + another_tenpo_theme_md_prdcd_list
-
-                logger.info(f'this_tenpo_theme_md_prdcd_list: {this_tenpo_theme_md_prdcd_list}')
-                logger.info(f'another_tenpo_theme_md_prdcd_list: {another_tenpo_theme_md_prdcd_list}')
-                logger.info(f'theme_md_prdcd_list (from shelf allocation): {theme_md_prdcd_list}')
-
-            except Exception as e:
-                logger.error(f"Error extracting from shelf allocation data: {e}")
-                return []  
-
-    return theme_md_prdcd_list
-
-# product_codes = extract_theme_md_product_codes(
-#     bucket_name=bucket_name,
-#     theme_md_mode=True,
-# )
-
-# product_codes = extract_theme_md_product_codes(
-#     bucket_name=bucket_name,
-#     theme_md_mode=True,
-#     tenpo_cd=12345,
-#     tanawari_ptn_cd_list=['094-990-187-02', '094-990-188-01']
-# )
-
-            
-            
-#################################
-# Old Code:
-# if bq_allow_large_results:
-#     # 商品マスタデータをBigQueryのテーブルからロード
-#     project_id = "dev-cainz-demandforecast"
-#     dataset_id = 'dev_cainz_nssol'
-#     table_id = 'M_090_PRD_NB_STD'
-#     my_tenpo_cd = str(tenpo_cd).zfill(4)
-    
-#     dest_str = f"""dev-cainz-demandforecast.test_data.temp_M_090_PRD_NB_STD_{my_tenpo_cd}"""
-
-#     client = bigquery.Client()        
-#     client.delete_table(dest_str, not_found_ok=True)
-
-#     client = bigquery.Client()
-#     bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#     job_config = bigquery.QueryJobConfig(
-#         allow_large_results=True, 
-#         destination=dest_str, 
-#         use_legacy_sql=False
-#     )
-#     query = f"""SELECT * FROM `{project_id}.{dataset_id}.{table_id}`"""
-    
-#     #print(query)
-#     logger.info("Executing query: %s", query)
-    
-    
-#     dfm_base = client.query(query, job_config=job_config).result().to_dataframe(bqstorage_client=bqstorageclient)
-#     dfm_base['PRD_CD'] = dfm_base['PRD_CD'].astype(int)
-#     dfm_base['BUMON_CD'] = dfm_base['BUMON_CD'].astype(int)
-#     dfm_base['cls_cd'] = dfm_base['cls_cd'].astype(int)
-
-#     #print('商品マスタ件数:', len(dfm_base))
-#     logger.info(f"商品マスタ件数: {len(dfm_base))
-
-
-# else:
-
-#     if 0:
-#         # 商品マスタデータをBigQueryのテーブルからロード
-#         project_id = "dev-cainz-demandforecast"
-#         dataset_id = 'dev_cainz_nssol'
-#         table_id = 'M_090_PRD_NB_STD'
-
-#         if 1:
-#             client = bigquery.Client()
-#             bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#             #client = bigquery.Client(project=project_id)
-#             #bqstorageclient = bigquery_storage.BigQueryStorageClient()
-
-#             target_query = f"""  SELECT * FROM {dataset_id}.{table_id} """  
-#             dfm_base = (
-#                 client.query(target_query)
-#                 .result()
-#                 .to_dataframe(bqstorage_client=bqstorageclient)
-#             )
-
-#             dfm_base['PRD_CD'] = dfm_base['PRD_CD'].astype(int)
-#             dfm_base['BUMON_CD'] = dfm_base['BUMON_CD'].astype(int)
-#             dfm_base['cls_cd'] = dfm_base['cls_cd'].astype(int)
-
-#             #print('商品マスタ件数:', len(dfm_base))
-#             logger.info(f"商品マスタ件数: {len(dfm_base)})
-
-
-#         else:
-#             def get_prdmaster_data( project_id, dataset_id, table_id):
-#                 my_tenpo_cd = str(tenpo_cd).zfill(4)
-#                 target_query = f"""  SELECT * FROM {dataset_id}.{table_id} """  
-#                 #print(target_query)
-#                 logger.info(f"target_query {target_query})
-#                 df_target = pd.read_gbq(target_query, project_id, dialect='standard')
-#                 return df_target
-
-#             dfm_base = get_prdmaster_data( project_id, dataset_id, table_id)
-#     else:
-#         dfm_base = short_term_preprocess_common.load_multiple_df(path_prd_master_list, bucket_name)
-
-
-
-#################################
-# Refactored Code: 
-def load_prd_master_from_bigquery_large_results(tenpo_cd: int, project_id: str, dataset_id: str, table_id: str) -> pd.DataFrame:
-    """
-    Loads product master data from BigQuery using the `allow_large_results` option.
-
-    Args:
-        tenpo_cd: The store code.
-        project_id: The Google Cloud project ID.
-        dataset_id: The BigQuery dataset ID.
-        table_id: The BigQuery table ID.
-
-    Returns:
-        A Pandas DataFrame containing the product master data.
-    """
-    my_tenpo_cd = str(tenpo_cd).zfill(4)
-    dest_table_id = f"{TEMP_TABLE_PREFIX}_{my_tenpo_cd}"
-    dest_str = f"""dev-cainz-demandforecast.test_data.temp_M_090_PRD_NB_STD_{my_tenpo_cd}"""
-
-    client = bigquery.Client()
-    
-
-    # Delete the temporary table if it exists
-    client.delete_table(dest_str, not_found_ok=True)
-    
-    client = bigquery.Client()
-    bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-
-    job_config = bigquery.QueryJobConfig(
-        allow_large_results=True,
-        destination=dest_str,
-        use_legacy_sql=False  # Use standard SQL
-    )
-
-    query = f"""SELECT * FROM `{project_id}.{dataset_id}.{table_id}`"""
-    logging.info("Executing query with allow_large_results: %s", query)
-
-    dfm_base = client.query(query, job_config=job_config).result().to_dataframe(bqstorage_client=bqstorageclient)
-    dfm_base['PRD_CD'] = dfm_base['PRD_CD'].astype(int)
-    dfm_base['BUMON_CD'] = dfm_base['BUMON_CD'].astype(int)
-    dfm_base['CLS_CD'] = dfm_base['CLS_CD'].astype(int)
-
-    logging.info(f"商品マスタ件数 (allow_large_results): {len(dfm_base)}")
-    return dfm_base
-
-
-def load_prd_master_from_multiple_files(path_prd_master_list: list[str], bucket_name: str) -> pd.DataFrame:
-    """
-    Loads product master data from multiple files using the `short_term_preprocess_common.load_multiple_df` function.
-
-    Args:
-        path_prd_master_list: A list of paths to the product master files.
-        bucket_name: The name of the GCS bucket.
-
-    Returns:
-        A Pandas DataFrame containing the product master data.
-    """
-    dfm_base = short_term_preprocess_common.load_multiple_df(path_prd_master_list, bucket_name)
-    logging.info(f"商品マスタ件数 (from multiple files): {len(dfm_base)}")
-    return dfm_base
-
-
-def load_product_master_data(
-    tenpo_cd: int,
-    bucket_name: str,
-    TABLE_ID: str, 
-) -> pd.DataFrame:
-    """
-    Loads product master data based on the bq_allow_large_results flag.
-
-    Args:
-        bq_allow_large_results: Flag indicating whether to use allow_large_results in BigQuery.
-        tenpo_cd: The store code.
-        path_prd_master_list: A list of paths to the product master files (used if bq_allow_large_results is False).
-        bucket_name: The name of the GCS bucket (used if bq_allow_large_results is False).
-
-    Returns:
-        A Pandas DataFrame containing the product master data.
-    """
-    if bq_allow_large_results:
-        dfm_base = load_prd_master_from_bigquery_large_results(
-            tenpo_cd=tenpo_cd,
-            project_id=PROJECT_ID,
-            dataset_id=DATASET_ID,
-            table_id=TABLE_ID,
-        )
-    else:
-        dfm_base = load_prd_master_from_multiple_files(
-            path_prd_master_list=path_prd_master_list,
-            bucket_name=bucket_name,
-        )
-
-    return dfm_base
-
-            
-
-            
-            
-            
-#################################
-# Old Code:          
-# col_dict = {}
-# for col in dfm_base.columns:
-#     col_dict[col] = col.lower()
-# dfm_base = dfm_base.rename(columns=col_dict)
-  
-# if seisan_tenpo_hattyuu_end_is_not_replaced:
-#     # 店舗別の生産発注停止情報を結合
-#     store_prd_hacchu_ymd = common.extract_as_df(path_tenpo_hacchu_master, bucket_name)
-#     store_prd_hacchu_ymd['TENPO_CD'] = store_prd_hacchu_ymd['TENPO_CD'].astype(int)
-#     store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].fillna(99999999)
-#     store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].astype(int)
-        
-# classify_excel_list = []
-# classify_df_list = []
-
-# if use_jan_connect:
-#     #print("===path_jan_master====",path_jan_master)
-#     logger.info(f"===path_jan_master==== {path_jan_master})
-#     jan_master = short_term_preprocess_common.load_jan_master_fix(
-#         path_jan_master,
-#         end_date,
-#         bucket_name
-#     )
-# for tenpo in tenpo_list:  
-#     classify_excel_list.append(
-#         pd.ExcelWriter(path_bunrui_prd_code.format(tenpo_df[tenpo_df['TENPO_CD']==tenpo]['TENPO_NM_KJ'].values[0]))
-#     )
-#     classify_df_list.append(pd.DataFrame())
-
-# #dpt_list = short_term_preprocess_common.get_dpt_list_from_bucket(
-# #    bucket_name,
-# #    path_tran_dir,
-# #)
-
-# # 93を追加 20240304
-# dpt_list = [69,97,14,37,27,39,28,74,33,30,36,75,85,80,20,22,55,72,15,62,32,77,84,89,23,60,25,87,68,56,92,61,2,40,86,88,26,17,24,34,52,64,73,21,35,58,83,94,63,38,18,29,19,31,53,45,50,81,82,90,91,54,95,93]
-
-# # 花王テーマMDモデル
-# #dpt_list = [22,34,64,72,73,74,83,84,85,86,87,89,93]
-
-# # test
-# #dpt_list = [94]
-
-# #print('dpt_list:', dpt_list)
-# logger.info(f"dpt_list: {dpt_list})
-
-# # チャンスロスデータを読み込む
-# #stockout_df = pd.DataFrame()
-# #path_stockout = "Basic_Analysis_unzip_result/02_DM/NBKepin_kaisu_prd_ten/keppin_kaisu_/"+str(tenpo_cd)+"_stockout_all.csv"
-# #stockout_df =  extract_as_df(path_stockout, bucket_name, "utf-8") 
-# #stockout_df = stockout_df.groupby(['nenshudo', 'TENPO_CD', 'prd_cd']).agg({'KEPPIN_CNT':'mean'}).reset_index()
-# #sales_df = pd.merge(sales_df,stockout_df.rename(columns={'prd_cd': 'PRD_CD', 'tenpo_cd': 'TENPO_CD'}),on=['nenshudo', 'PRD_CD', 'TENPO_CD'],how='left')
-
-# # チャンスロスデータをBigQueryのテーブルからロード
-# project_id = "dev-cainz-demandforecast"
-# dataset_id = 'dev_cainz_nssol'
-# table_id = 'T_090_PRD_CHANCE_LOSS_NB_DPT'
-# def get_chanceloss_data( project_id, dataset_id, table_id, tenpo_cd):
-#     my_tenpo_cd = str(tenpo_cd).zfill(4)
-#     target_query = f"""  SELECT * FROM {dataset_id}.{table_id} where TENPO_CD = '{my_tenpo_cd}'"""  
-#     #print(target_query)
-#     logger.info(f"target_query {target_query})
-    
-#     if 1:
-#         client = bigquery.Client()
-#         #client = bigquery.Client(project=project_id)
-#         bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#         #bqstorageclient = bigquery_storage.BigQueryStorageClient()
-#         df_target = (
-#             client.query(target_query)
-#             .result()
-#             .to_dataframe(bqstorage_client=bqstorageclient)
-#         )
-#     else:
-#         df_target = pd.read_gbq(target_query, project_id, dialect='standard')
-    
-#     return df_target
-
-# chance_loss_data = get_chanceloss_data( project_id, dataset_id, table_id, tenpo_cd)
-# #print('チャンスロスデータ件数:', len(chance_loss_data))
-# logger.info(f'チャンスロスデータ件数: {len(chance_loss_data)}')
-
-# chance_loss_data['PRD_CD'] = chance_loss_data['PRD_CD'].astype(int)
-# chance_loss_data['NENSHUDO'] = chance_loss_data['NENSHUDO'].astype(int)
-# chance_loss_data['TENPO_CD'] = chance_loss_data['TENPO_CD'].astype(int)
-# chance_loss_data['CHANCE_LOSS_PRD_SU'] = chance_loss_data['CHANCE_LOSS_PRD_SU'].astype(float)
-# chance_loss_data['CHANCE_LOSS_KN'] = chance_loss_data['CHANCE_LOSS_KN'].astype(float)
-# chance_loss_data['CHANCE_LOSS_KN'][chance_loss_data['CHANCE_LOSS_PRD_SU'].astype(int)==0] = 0.0
-
-                
-                
-#################################
-# Refactored Code: 
-def get_chanceloss_data(project_id: str, dataset_id: str, table_id: str, tenpo_cd: int) -> pd.DataFrame:
-    """
-    Retrieves chance loss data from BigQuery.
-
-    Args:
-        project_id: Google Cloud project ID.
-        dataset_id: BigQuery dataset ID.
-        table_id: BigQuery table ID.
-        tenpo_cd: Store code.
-
-    Returns:
-        DataFrame containing the chance loss data.
-    """
-    my_tenpo_cd = str(tenpo_cd).zfill(4)
-    target_query = f"""  SELECT * FROM {dataset_id}.{table_id} where TENPO_CD = '{my_tenpo_cd}'"""  
-    logger.info(f"target_query {target_query}")
-
-    if 1:
-        client = bigquery.Client()
-        #client = bigquery.Client(project=project_id)
-        bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-        #bqstorageclient = bigquery_storage.BigQueryStorageClient()
-        df_target = (
-            client.query(target_query)
-            .result()
-            .to_dataframe(bqstorage_client=bqstorageclient)
-        )
-    else:
-        df_target = pd.read_gbq(target_query, project_id, dialect='standard')  
-
-    df_target['PRD_CD'] = df_target['PRD_CD'].astype(int)
-    df_target['NENSHUDO'] = df_target['NENSHUDO'].astype(int)
-    df_target['TENPO_CD'] = df_target['TENPO_CD'].astype(int)
-    df_target['CHANCE_LOSS_PRD_SU'] = df_target['CHANCE_LOSS_PRD_SU'].astype(float)
-    df_target['CHANCE_LOSS_KN'] = df_target['CHANCE_LOSS_KN'].astype(float)
-    df_target['CHANCE_LOSS_KN'][df_target['CHANCE_LOSS_PRD_SU'].astype(int) == 0] = 0.0
-
-    return df_target
-                
-                
-def process_data(
-    dfm_base: pd.DataFrame,
-    end_date: str,
-    tenpo_list: List[int],
-    tenpo_df: pd.DataFrame,
-    tenpo_cd: int,
-    table_id: str,
-):
-    project_id = PROJECT_ID
-    col_dict = {col: col.lower() for col in dfm_base.columns}
-    dfm_base = dfm_base.rename(columns=col_dict)
-
-    # 店舗別の生産発注停止情報を結合 ---
-    if seisan_tenpo_hattyuu_end_is_not_replaced:
-        store_prd_hacchu_ymd = common.extract_as_df(path_tenpo_hacchu_master, bucket_name)
-        store_prd_hacchu_ymd['TENPO_CD'] = store_prd_hacchu_ymd['TENPO_CD'].astype(int)
-        store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].fillna(99999999)
-        store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].astype(int)
-
-    classify_excel_list: List[pd.ExcelWriter] = []
-    classify_df_list: List[pd.DataFrame] = []
-
-    if use_jan_connect:
-        logger.info(f"===path_jan_master==== {path_jan_master}")
-        jan_master = short_term_preprocess_common.load_jan_master_fix(
-            path_jan_master,
-            end_date,
-            bucket_name
-        )
-
-    for tenpo in tenpo_list:
-        classify_excel_list.append(
-            pd.ExcelWriter(path_bunrui_prd_code.format(tenpo_df[tenpo_df['TENPO_CD'] == tenpo]['TENPO_NM_KJ'].values[0]))
-        )
-        classify_df_list.append(pd.DataFrame())
-    
-    logger.info(f"dpt_list: {dpt_list}")
-
-    chance_loss_data = get_chanceloss_data(PROJECT_ID, DATASET_ID, table_id, tenpo_cd)
-    logger.info(f'チャンスロスデータ件数: {len(chance_loss_data)}')
-    return chance_loss_data, jan_master, store_prd_hacchu_ymd, dfm_base
-                
-                
-                            
-#################################
-# Old Code:  
-# ケース、パック、バラの繋がりを補間するためのテーブル作成（selling_periodには発注JANしか含まれていないため）------------
-# prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-# prd_asc_tmp = prd_asc_tmp[['prd_cd', 'asc_prd_cd']].rename(columns={"prd_cd":"PRD_CD", 'asc_prd_cd':"ASC_PRD_CD"})
-# # ケース、パック、バラのグループを作成
-# groups = []
-# for parent, child in zip(prd_asc_tmp['PRD_CD'].tolist(), prd_asc_tmp['ASC_PRD_CD'].tolist()):
-#     found_group = False
-#     # 各グループをサーチして、親か子が含まれるグループをみつける
-#     for group in groups:
-#         # 既存グループに親か子が含まれていれば、そのグループに追加する
-#         if parent in group or child in group:
-#             group.add(parent)
-#             group.add(child)
-#             found_group = True
-#             break
-#     # 親か子が含まれるグループがなければ、新しいグループを作成する
-#     if not found_group:
-#         groups.append(set([parent, child]))
-
-# # 商品コードと、ケースパックバラのグループの辞書を作成    
-# prdcd_grp = {}
-# for grp in groups:
-#     for prdcd in grp:
-#         prdcd_grp[prdcd] = grp
-
-# # ケースパックバラ商品コードと発注JANの対応テーブルを作成する ------------------------------------------------------
-# prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-# prd_asc_tmp = prd_asc_tmp[['prd_cd', 'asc_prd_cd', 'daihyo_torihikisaki_nm', 'asc_daihyo_torihikisaki_nm']].rename(columns={"prd_cd":"PRD_CD", 'asc_prd_cd':"ASC_PRD_CD"})
-
-# prdcd_hattyujan_list = []
-
-# prdcd_torihikisaki = pd.concat([prd_asc_tmp[['PRD_CD', 'daihyo_torihikisaki_nm']].rename(columns={'daihyo_torihikisaki_nm':"daihyo_torihikisaki_nm"}).reset_index(drop=True), 
-#                                         prd_asc_tmp[['ASC_PRD_CD', 'asc_daihyo_torihikisaki_nm']].rename(columns={'ASC_PRD_CD':'PRD_CD', 'asc_daihyo_torihikisaki_nm':"daihyo_torihikisaki_nm"}).reset_index(drop=True)])
-
-# prdcd_torihikisaki = prdcd_torihikisaki.drop_duplicates().reset_index(drop=True)
-
-# for grp in groups:
-#     my_prdcd_torihikisaki = prdcd_torihikisaki[prdcd_torihikisaki['PRD_CD'].isin(grp)].reset_index(drop=True)
-#     hattyu_prdcd_torihikisaki = my_prdcd_torihikisaki[my_prdcd_torihikisaki['daihyo_torihikisaki_nm'] != 'ＰＯＳ　ＰＬＵ登録'].reset_index(drop=True)
-#     if len(hattyu_prdcd_torihikisaki) == 1:
-#         for prdcd in grp:
-#             #prdcd_hattyujan[prdcd] = my_prdcd_torihikisaki['PRD_CD'][0]
-#             if prdcd != hattyu_prdcd_torihikisaki['PRD_CD'][0]:
-#                 prdcd_hattyujan_list.append([prdcd, hattyu_prdcd_torihikisaki['PRD_CD'][0]])
-            
-#     elif len(hattyu_prdcd_torihikisaki) > 1:
-#         #print('hattyu_prdcd_torihikisaki件数異常')
-#         logger.error('hattyu_prdcd_torihikisaki件数異常')
-#         logger.info("
-#         #sys.exit()
-#     elif len(hattyu_prdcd_torihikisaki) == 0:
-#         #print('hattyu_prdcd_torihikisaki件数異常0')
-#         logger.error('hattyu_prdcd_torihikisaki件数異常')
-#         #sys.exit()
-
-# prdcd_hattyujan_df = pd.DataFrame(prdcd_hattyujan_list)
-# prdcd_hattyujan_df.columns = ['PRD_CD', 'HACCHU_JAN']
-# prdcd_hattyujan_df.to_csv('prdcd_hattyujan_df.csv', index=False)
-                   
-                    
-
-#################################
-# Refactored Code: 
-def create_case_pack_bara_groups(prd_asc, prd_asc_tmp):
-    
-
-    groups = []
-    for parent, child in zip(prd_asc_tmp['PRD_CD'].tolist(), prd_asc_tmp['ASC_PRD_CD'].tolist()):
-        found_group = False
-        for group in groups:
-            if parent in group or child in group:
-                group.add(parent)
-                group.add(child)
-                found_group = True
-                break
-        if not found_group:
-            groups.append(set([parent, child]))
-    return groups
-
-
-def create_prdcd_to_group_dict(groups):
-    prdcd_grp = {}
-    for grp in groups:
-        for prdcd in grp:
-            prdcd_grp[prdcd] = grp
-    return prdcd_grp
-
-
-def create_prdcd_hattyujan_df(prd_asc, groups):
-    prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-    prd_asc_tmp = prd_asc_tmp[['prd_cd', 'asc_prd_cd', 'daihyo_torihikisaki_nm', 'asc_daihyo_torihikisaki_nm']].rename(columns={"prd_cd":"PRD_CD", 'asc_prd_cd':"ASC_PRD_CD"})
-
-    prdcd_torihikisaki = pd.concat([prd_asc_tmp[['PRD_CD', 'daihyo_torihikisaki_nm']].rename(columns={'daihyo_torihikisaki_nm':"daihyo_torihikisaki_nm"}).reset_index(drop=True), 
-                                        prd_asc_tmp[['ASC_PRD_CD', 'asc_daihyo_torihikisaki_nm']].rename(columns={'ASC_PRD_CD':'PRD_CD', 'asc_daihyo_torihikisaki_nm':"daihyo_torihikisaki_nm"}).reset_index(drop=True)])
-
-    prdcd_torihikisaki = prdcd_torihikisaki.drop_duplicates().reset_index(drop=True)
-
-    prdcd_hattyujan_list = []
-    for grp in groups:
-        my_prdcd_torihikisaki = prdcd_torihikisaki[prdcd_torihikisaki['PRD_CD'].isin(grp)].reset_index(drop=True)
-        hattyu_prdcd_torihikisaki = my_prdcd_torihikisaki[my_prdcd_torihikisaki['daihyo_torihikisaki_nm'] != 'ＰＯＳ　ＰＬＵ登録'].reset_index(drop=True)
-
-        if len(hattyu_prdcd_torihikisaki) == 1:
-            for prdcd in grp:
-                if prdcd != hattyu_prdcd_torihikisaki['PRD_CD'][0]:
-                    prdcd_hattyujan_list.append([prdcd, hattyu_prdcd_torihikisaki['PRD_CD'][0]])
-                
-        elif len(hattyu_prdcd_torihikisaki) > 1:
-            logger.error('hattyu_prdcd_torihikisaki件数異常')
-        elif len(hattyu_prdcd_torihikisaki) == 0:
-            logger.error('hattyu_prdcd_torihikisaki件数異常')
-
-    prdcd_hattyujan_df = pd.DataFrame(prdcd_hattyujan_list)
-    prdcd_hattyujan_df.columns = ['PRD_CD', 'HACCHU_JAN']
-    return prdcd_hattyujan_df
-
-
-                   
-                               
-#################################
-# Old Code:                     
-# ケースパックバラの入数から、発注JAN入数への数量変換係数を作成する -----------------------------------------------------------------------------
-# prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-# prdcd_hcjan_coef = {}
-# prdcd_hcjan_coef_log = []
-# for prdcd, hcjan in zip(prdcd_hattyujan_df['PRD_CD'], prdcd_hattyujan_df['HACCHU_JAN']):
-    
-#     # 発注JANがasc(パックかバラのみ）の場合
-#     if hcjan not in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-#         # 元JANがケースパックにある
-#         if prdcd in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-#             # 入数倍にする
-#             tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)&(prd_asc_tmp['asc_prd_cd']==hcjan)]['iri_su'].reset_index(drop=True)
-#             if len(tmp) == 1:
-#                 prdcd_hcjan_coef[prdcd] = float(tmp[0])
-#                 prdcd_hcjan_coef_log.append(['1-1', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in asc_prd_cd', '', prdcd_hcjan_coef[prdcd], 'iri_su'])
-#             else:
-#                 #print('1-1 発注JANがasc_prd_cdで元JANがprd_cdにありますが、レコードが複数あります', prdcd, hcjan)
-#                 logger.info("1-1 発注JANがasc_prd_cdで元JANがprd_cdにありますが、レコードが複数あります", prdcd, hcjan)
-#                 sys.exit()
-#         else:
-#             #print('1-2 発注JANがasc_prd_cdで元JANがprd_cdにないです', prdcd, hcjan)
-#             logger.info("1-2 発注JANがasc_prd_cdで元JANがprd_cdにないです", prdcd, hcjan)
-#             sys.exit()
-        
-#     # 発注JANがケースの場合
-#     elif hcjan in prd_asc_tmp['prd_cd'].tolist() and hcjan not in prd_asc_tmp['asc_prd_cd'].tolist():
-#         # 元JANがasc_prd_cdにあれば、その入数を使う
-#         if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['asc_prd_cd'].tolist():
-#             tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==hcjan)&(prd_asc_tmp['asc_prd_cd']==prdcd)]['iri_su'].reset_index(drop=True)
-#             if len(tmp) == 1:
-#                 prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp[0])
-#                 prdcd_hcjan_coef_log.append(['2-1', prdcd, hcjan, 'prdcd in asc_prd_cd', 'hcjan in prd_cd', '', prdcd_hcjan_coef[prdcd], '1/iri_su'])
-#             else:
-#                 #print('2-1 発注JANがprd_cdで元JANがasc_prd_cdにありますが、レコードが複数あります', prdcd, hcjan)
-#                 logger.info('2-1 発注JANがprd_cdで元JANがasc_prd_cdにありますが、レコードが複数あります', prdcd, hcjan)
-#                 sys.exit()
-#         # 元JANがasc_prd_cdにない（例：元JANがパックのとき）
-#         else:
-#             if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['prd_cd'].tolist():
-#                 # 発注単位統一個数を使う
-#                 tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)]['hacchu_tani_toitsu_kosu'].reset_index(drop=True)
-#                 if len(tmp) == 1:
-#                     prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp[0])
-#                     prdcd_hcjan_coef_log.append(['2-2', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in prd_cd', '', prdcd_hcjan_coef[prdcd], '1/hacchu_tani_toitsu_kosu' ])
-#                 else:
-#                     #print('2-2 発注JANがケースで元JANがasc_prd_cdにない、元JANはprd_cdに複数あり選べません', prdcd, hcjan)
-#                     logger.info('2-2 発注JANがケースで元JANがasc_prd_cdにない、元JANはprd_cdに複数あり選べません', prdcd, hcjan)
-#                     sys.exit()
-    
-#     # 発注JANがどちらにもある場合（20本POSPLU、10本発注、1本POSPLU）
-#     elif hcjan in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-#         #print('発注JANがケースとバラ両方にあります', prdcd, hcjan)
-#         logger.info('発注JANがケースとバラ両方にあります', prdcd, hcjan)
-        
-#         # 発注JANがケースで元JANがasc(バラかパック)の場合
-#         if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['asc_prd_cd'].tolist():
-#             tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==hcjan)&(prd_asc_tmp['asc_prd_cd']==prdcd)].reset_index(drop=True)
-#             if len(tmp) == 1:
-#                 prdcd_hcjan_coef[prdcd] = float(tmp['iri_su'][0])
-#                 prdcd_hcjan_coef_log.append(['3-1', prdcd, hcjan, 'prdcd in asc_prd_cd', 'hcjan in prd_cd', 'hcjan in asc_prd_cd', prdcd_hcjan_coef[prdcd], 'iri_su' ])
-#             else:
-#                 #print('3-1 発注JANがどちらにもあり、発注JANがケースで元JANがバラかパックですが、レコードが複数あります', prdcd, hcjan)
-#                 logger,info('3-1 発注JANがどちらにもあり、発注JANがケースで元JANがバラかパックですが、レコードが複数あります', prdcd, hcjan)
-#                 sys.exit()
-            
-#         # 発注JANがパックバラで元JANがケースパックの場合
-#         elif prdcd in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-#             tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)&(prd_asc_tmp['asc_prd_cd']==hcjan)].reset_index(drop=True)
-#             if len(tmp) == 1:
-#                 prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp['iri_su'][0])
-#                 prdcd_hcjan_coef_log.append(['4-1', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in asc_prd_cd', 'hcjan in prd_cd', prdcd_hcjan_coef[prdcd], '1/iri_su' ])
-#             else:
-#                 #print('4-1 発注JANがどちらにもあり、元JANがケースで発注JANがバラかパックですがレコードが複数あります', prdcd, hcjan)
-#                 logger.info('4-1 発注JANがどちらにもあり、元JANがケースで発注JANがバラかパックですがレコードが複数あります', prdcd, hcjan)
-#                 sys.exit()
-
-#     # 発注JANがどちらにもない場合
-#     else:
-#         #print('発注JANがケースにもバラにもありません', prdcd, hcjan)
-#         logger.info('発注JANがケースにもバラにもありません', prdcd, hcjan)
-#         sys.eixt()
-
-                       
-
-#################################
-# Refactored Code: 
-def calculate_prdcd_hcjan_coefficients(prd_asc, prdcd_hattyujan_df):
-    """
-    商品コードと発注JANの係数を計算する。
-    Calculates the coefficients between product codes (PRD_CD) and order JAN codes (HACCHU_JAN).
-
-    Args:
-        prd_asc (pd.DataFrame): prd_asc データフレーム. DataFrame containing product assembly information.
-        prdcd_hattyujan_df (pd.DataFrame): 商品コードと発注JANの対応テーブル. DataFrame mapping product codes to order JAN codes.
-
-    Returns:
-        tuple: (prdcd_hcjan_coef, prdcd_hcjan_coef_log)
-               - prdcd_hcjan_coef (dict): 商品コードをキー、係数を値とする辞書. Dictionary with product codes as keys and calculated coefficients as values.
-               - prdcd_hcjan_coef_log (list): 係数計算のログ. List of logs detailing the coefficient calculation process.
-    """
-    prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-    prdcd_hcjan_coef = {}
-    prdcd_hcjan_coef_log = []
-    for prdcd, hcjan in zip(prdcd_hattyujan_df['PRD_CD'], prdcd_hattyujan_df['HACCHU_JAN']):
-        # 発注JANがasc(パックかバラのみ）の場合
-        if hcjan not in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-            # 元JANがケースパックにある
-            if prdcd in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-                # 入数倍にする
-                tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)&(prd_asc_tmp['asc_prd_cd']==hcjan)]['iri_su'].reset_index(drop=True)
-                if len(tmp) == 1:
-                    prdcd_hcjan_coef[prdcd] = float(tmp[0])
-                    prdcd_hcjan_coef_log.append(['1-1', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in asc_prd_cd', '', prdcd_hcjan_coef[prdcd], 'iri_su'])
-                else:
-                    #print('1-1 発注JANがasc_prd_cdで元JANがprd_cdにありますが、レコードが複数あります', prdcd, hcjan)
-                    logger.info(f"1-1 発注JANがasc_prd_cdで元JANがprd_cdにありますが、レコードが複数あります prdcd={prdcd} hcjan={hcjan}")
-                    sys.exit()
-            else:
-                #print('1-2 発注JANがasc_prd_cdで元JANがprd_cdにないです', prdcd, hcjan)
-                logger.info(f"1-2 発注JANがasc_prd_cdで元JANがprd_cdにないです prdcd={prdcd} hcjan={hcjan}")
-                sys.exit()
-            
-        # 発注JANがケースの場合
-        elif hcjan in prd_asc_tmp['prd_cd'].tolist() and hcjan not in prd_asc_tmp['asc_prd_cd'].tolist():
-            # 元JANがasc_prd_cdにあれば、その入数を使う
-            if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['asc_prd_cd'].tolist():
-                tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==hcjan)&(prd_asc_tmp['asc_prd_cd']==prdcd)]['iri_su'].reset_index(drop=True)
-                if len(tmp) == 1:
-                    prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp[0])
-                    prdcd_hcjan_coef_log.append(['2-1', prdcd, hcjan, 'prdcd in asc_prd_cd', 'hcjan in prd_cd', '', prdcd_hcjan_coef[prdcd], '1/iri_su'])
-                else:
-                    #print('2-1 発注JANがprd_cdで元JANがasc_prd_cdにありますが、レコードが複数あります', prdcd, hcjan)
-                    logger.info(f"2-1 発注JANがprd_cdで元JANがasc_prd_cdにありますが、レコードが複数あります prdcd={prdcd} hcjan={hcjan}")
-                    sys.exit()
-            # 元JANがasc_prd_cdにない（例：元JANがパックのとき）
-            else:
-                if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['prd_cd'].tolist():
-                    # 発注単位統一個数を使う
-                    tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)]['hacchu_tani_toitsu_kosu'].reset_index(drop=True)
-                    if len(tmp) == 1:
-                        prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp[0])
-                        prdcd_hcjan_coef_log.append(['2-2', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in prd_cd', '', prdcd_hcjan_coef[prdcd], '1/hacchu_tani_toitsu_kosu' ])
-                    else:
-                        #print('2-2 発注JANがケースで元JANがasc_prd_cdにない、元JANはprd_cdに複数あり選べません', prdcd, hcjan)
-                        logger.info(f"2-2 発注JANがケースで元JANがasc_prd_cdにない、元JANはprd_cdに複数あり選べません prdcd={prdcd} hcjan={hcjan}")
-                        sys.exit()
-
-        # 発注JANがどちらにもある場合（20本POSPLU、10本発注、1本POSPLU）
-        elif hcjan in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-            #print('発注JANがケースとバラ両方にあります', prdcd, hcjan)
-            logger.info(f"発注JANがケースとバラ両方にあります prdcd={prdcd} hcjan={hcjan}")
-
-            # 発注JANがケースで元JANがasc(バラかパック)の場合
-            if hcjan in prd_asc_tmp['prd_cd'].tolist() and prdcd in prd_asc_tmp['asc_prd_cd'].tolist():
-                tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==hcjan)&(prd_asc_tmp['asc_prd_cd']==prdcd)].reset_index(drop=True)
-                if len(tmp) == 1:
-                    prdcd_hcjan_coef[prdcd] = float(tmp['iri_su'][0])
-                    prdcd_hcjan_coef_log.append(['3-1', prdcd, hcjan, 'prdcd in asc_prd_cd', 'hcjan in prd_cd', 'hcjan in asc_prd_cd', prdcd_hcjan_coef[prdcd], 'iri_su' ])
-                else:
-                    #print('3-1 発注JANがどちらにもあり、発注JANがケースで元JANがバラかパックですが、レコードが複数あります', prdcd, hcjan)
-                    logger.info(f"3-1 発注JANがどちらにもあり、発注JANがケースで元JANがバラかパックですが、レコードが複数あります prdcd={prdcd} hcjan={hcjan}")
-                    sys.exit()
-
-            # 発注JANがパックバラで元JANがケースパックの場合
-            elif prdcd in prd_asc_tmp['prd_cd'].tolist() and hcjan in prd_asc_tmp['asc_prd_cd'].tolist():
-                tmp = prd_asc_tmp[(prd_asc_tmp['prd_cd']==prdcd)&(prd_asc_tmp['asc_prd_cd']==hcjan)].reset_index(drop=True)
-                if len(tmp) == 1:
-                    prdcd_hcjan_coef[prdcd] = 1.0 / float(tmp['iri_su'][0])
-                    prdcd_hcjan_coef_log.append(['4-1', prdcd, hcjan, 'prdcd in prd_cd', 'hcjan in asc_prd_cd', 'hcjan in prd_cd', prdcd_hcjan_coef[prdcd], '1/iri_su' ])
-                else:
-                    #print('4-1 発注JANがどちらにもあり、元JANがケースで発注JANがバラかパックですがレコードが複数あります', prdcd, hcjan)
-                    logger.info(f"4-1 発注JANがどちらにもあり、元JANがケースで発注JANがバラかパックですがレコードが複数あります prdcd={prdcd} hcjan={hcjan}")
-                    sys.exit()
-
-        # 発注JANがどちらにもない場合
-        else:
-            #print('発注JANがケースにもバラにもありません', prdcd, hcjan)
-            logger.info(f"発注JANがケースにもバラにもありません prdcd={prdcd} hcjan={hcjan}")
-            sys.eixt() # Typo here as well, should be sys.exit()
-    return prdcd_hcjan_coef, prdcd_hcjan_coef_log
-                        
-           
-            
- 
-            
-#################################
-# Old Code:              
-# prdcd_hcjan_coef_log_df = pd.DataFrame(prdcd_hcjan_coef_log)
-# prdcd_hcjan_coef_log_df.columns = ['case', '元JAN', '発注JAN', '元JAN位置', '発注JAN位置', '元発両位置にあり', '係数', '係数根拠']
-# prdcd_hcjan_coef_log_df.to_csv('prdcd_hcjan_coef_log_df.csv')
-
-# prdcd_hattyujan_df['HJAN_COEF'] = prdcd_hattyujan_df['PRD_CD'].apply(lambda x:prdcd_hcjan_coef[x])
-# prdcd_hattyujan_df['HJAN_COEF'] = prdcd_hattyujan_df['HJAN_COEF'].astype(float)
-# prdcd_hattyujan_df.to_csv('prdcd_hattyujan_df2.csv', index=False)
-
-# if OUTPUT_HACCHUJAN_INFO and prdcd_hacchujan_df_flag and (tenpo_cd == 760):
-    
-#     prdcd_hattyujan_df['NENSHUDO'] =  end_nenshudo
-    
-#     from google.cloud import bigquery
-#     from google.cloud.bigquery import Client as BigqueryClient
-    
-#     if OUTPUT_HACCHUJAN_TABLE_TEST:
-#         table_id = "dev-cainz-demandforecast.cainz_shortterm_predicted_value_for_statistics.hacchujan_relations_all_test"
-#     else:
-#         table_id = "dev-cainz-demandforecast.cainz_shortterm_predicted_value_for_statistics.hacchujan_relations_all"
-    
-#     job_config = bigquery.LoadJobConfig(
-#         schema=[
-#             bigquery.SchemaField('PRD_CD', 'INTEGER', mode='NULLABLE'),
-#             bigquery.SchemaField('HACCHU_JAN', 'INTEGER', mode='NULLABLE'),
-#             bigquery.SchemaField('HJAN_COEF', 'FLOAT', mode='NULLABLE'),
-#             bigquery.SchemaField('NENSHUDO', 'INTEGER', mode='NULLABLE'),
-
-#         ],
-#         write_disposition='WRITE_APPEND',
-#     )
-    
-    
-#     client = BigqueryClient()
-#     job = client.load_table_from_dataframe(prdcd_hattyujan_df, table_id, job_config=job_config)
-#     job.result()
-    
-# if OUTPUT_HACCHUJAN_INFO_GCS and (tenpo_cd == 760):
-#     path_upload_blob = "Basic_Analysis_unzip_result/02_DM/CASE_PACK_BARA/prdcd_hattyujan_df2.csv"
-#     tmp_fname = "prdcd_hattyujan_df2.csv"
-#     blob = bucket.blob(path_upload_blob)
-#     blob.upload_from_filename(tmp_fname)
-    
-
-            
-#################################
-# Refactored Code: 
-def output_hacchujan_info(prdcd_hcjan_coef, prdcd_hcjan_coef_log, prdcd_hattyujan_df, end_nenshudo, tenpo_cd):
-    """
-    発注JAN情報を出力する。
-    Outputs order JAN information to CSV, BigQuery, and GCS.
-
-    Args:
-        prdcd_hcjan_coef (dict): 商品コードをキー、係数を値とする辞書. Dictionary with product codes as keys and calculated coefficients as values.
-        prdcd_hcjan_coef_log (list): 係数計算のログ. List of logs detailing the coefficient calculation process.
-        prdcd_hattyujan_df (pd.DataFrame): 商品コードと発注JANの対応テーブル. DataFrame mapping product codes to order JAN codes.
-        end_nenshudo (int): 年度. Fiscal year.
-        OUTPUT_HACCHUJAN_INFO (bool): BigQuery出力フラグ. Flag to indicate whether to output to BigQuery.
-        prdcd_hacchujan_df_flag (bool): データフレームフラグ. Flag indicating if the DataFrame is valid.
-        tenpo_cd (int): 店舗コード. Store code.
-        OUTPUT_HACCHUJAN_TABLE_TEST (bool): テストテーブル出力フラグ. Flag to indicate whether to output to the test table.
-        OUTPUT_HACCHUJAN_INFO_GCS (bool): GCS出力フラグ. Flag to indicate whether to output to GCS.
-        bucket (google.cloud.storage.bucket.Bucket): GCSバケット. Google Cloud Storage bucket object.
-
-    Returns:
-        prdcd_hattyujan_df(dataframe)
-    """
-    tmp_log_fname = 'prdcd_hcjan_coef_log_df.csv'
-    tmp_hacchu_fname = 'prdcd_hattyujan_df2.csv'
-
-    try:
-        # Output coefficient calculation log to CSV
-        prdcd_hcjan_coef_log_df = pd.DataFrame(prdcd_hcjan_coef_log)
-        prdcd_hcjan_coef_log_df.columns = ['case', '元JAN', '発注JAN', '元JAN位置', '発注JAN位置', '元発両位置にあり', '係数', '係数根拠']
-        prdcd_hcjan_coef_log_df.to_csv(tmp_log_fname)
-
-        # Prepare and output the prdcd_hattyujan_df DataFrame to CSV
-        prdcd_hattyujan_df['HJAN_COEF'] = prdcd_hattyujan_df['PRD_CD'].apply(lambda x: prdcd_hcjan_coef[x])
-        prdcd_hattyujan_df['HJAN_COEF'] = prdcd_hattyujan_df['HJAN_COEF'].astype(float)
-        prdcd_hattyujan_df.to_csv(tmp_hacchu_fname, index=False)
-
-        # BigQuery Output
-        if OUTPUT_HACCHUJAN_INFO and prdcd_hacchujan_df_flag and (tenpo_cd == 760):
-            prdcd_hattyujan_df['NENSHUDO'] = end_nenshudo
-
-            table_id = "{}.cainz_shortterm_predicted_value_for_statistics.hacchujan_relations_all_test".format(os.environ['PROJECT_ID']) if OUTPUT_HACCHUJAN_TABLE_TEST else "{}.cainz_shortterm_predicted_value_for_statistics.hacchujan_relations_all".format(os.environ['PROJECT_ID'])
-
-            job_config = bigquery.LoadJobConfig(
-                schema=[
-                    bigquery.SchemaField('PRD_CD', 'INTEGER', mode='NULLABLE'),
-                    bigquery.SchemaField('HACCHU_JAN', 'INTEGER', mode='NULLABLE'),
-                    bigquery.SchemaField('HJAN_COEF', 'FLOAT', mode='NULLABLE'),
-                    bigquery.SchemaField('NENSHUDO', 'INTEGER', mode='NULLABLE'),
-                ],
-                write_disposition='WRITE_APPEND',
-            )
-
-            client = BigqueryClient()
-            job = client.load_table_from_dataframe(prdcd_hattyujan_df, table_id, job_config=job_config)
-            job.result()  # Waits for the job to complete.
-
-        # GCS Output
-        if OUTPUT_HACCHUJAN_INFO_GCS and (tenpo_cd == 760):
-            path_upload_blob = "Basic_Analysis_unzip_result/02_DM/CASE_PACK_BARA/prdcd_hattyujan_df2.csv"
-            blob = bucket.blob(path_upload_blob)
-            blob.upload_from_filename(tmp_hacchu_fname)
-
-    except Exception as e:
-        logger.exception("An error occurred during hacchujan info output: %s", e)
-        raise # Re-raise the exception after logging
-
-    finally:
-        # Clean up temporary files
-        try:
-            os.remove(tmp_log_fname)
-        except OSError:
-            pass  # Ignore if the file doesn't exist
-
-        try:
-            os.remove(tmp_hacchu_fname)
-        except OSError:
-            pass  # Ignore if the file doesn't exist
-    
-    return prdcd_hattyujan_df
-            
-
-
-
-#################################
-# Old Code: 
-# def get_df_cal_out_calender(
-#     dfc,
-#     start_nenshudo,
-#     end_nenshudo,
-# ):
-#     col_list = ["nenshudo","shudo","week_from_ymd", 'nendo', 'znen_nendo', 'znen_shudo', 'minashi_tsuki']
-#     df_cal = pd.DataFrame(dfc["nenshudo"].drop_duplicates().sort_values().reset_index(drop=True))
-#     df_cal = dfc[
-#         (dfc["nenshudo"]>=start_nenshudo) & \
-#         (dfc["nenshudo"]<=end_nenshudo)
-#     ][col_list].reset_index(drop=True)
-#     df_cal["date"] = df_cal["week_from_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-    
-#     df_cal = df_cal.loc[
-#         (df_cal['nenshudo']>=start_nenshudo) & \
-#         (df_cal['nenshudo']<=end_nenshudo)
-#     ].reset_index(drop=True)
-    
-#     return df_cal
-
-
-#################################
-# Refactored Code:         
-def get_df_cal_out_calender(
-    dfc,
-    start_nenshudo,
-    end_nenshudo, col_list
-):
-    """
-    指定された年度範囲の暦情報を抽出する。
-    Extracts calendar information for the specified fiscal year range.
-
-    Args:
-        dfc (pd.DataFrame): カレンダー情報を含むDataFrame. DataFrame containing calendar information.
-        start_nenshudo (int): 開始年度. Start fiscal year.
-        end_nenshudo (int): 終了年度. End fiscal year.
-
-    Returns:
-        pd.DataFrame: 指定された年度範囲の暦情報. Calendar information for the specified fiscal year range.
-    """
-    #col_list = ["nenshudo","shudo","week_from_ymd", 'nendo', 'znen_nendo', 'znen_shudo', 'minashi_tsuki']
-    df_cal = pd.DataFrame(dfc["nenshudo"].drop_duplicates().sort_values().reset_index(drop=True))
-    df_cal = dfc[
-        (dfc["nenshudo"]>=start_nenshudo) & \
-        (dfc["nenshudo"]<=end_nenshudo)
-    ][col_list].reset_index(drop=True)
-    df_cal["date"] = df_cal["week_from_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-    df_cal = pd.merge(df_cal, dfc[['nenshudo', 'nendo', 'znen_nendo', 'znen_shudo','minashi_tsuki']], on='nenshudo')
-    df_cal = df_cal.loc[
-        (df_cal['nenshudo']>=start_nenshudo) & \
-        (df_cal['nenshudo']<=end_nenshudo)
-    ].reset_index(drop=True)
-    
-    return df_cal
-                                  
-            
-#################################
-# Old Code:     
-# def merge_df_cal(
-#     df,
-#     df_cal,
-#     tenpo_cd,
-#     dpt
-# ):
-#     prd_cal = pd.merge(df[['PRD_CD']].drop_duplicates().assign(join_key=1),
-#                        df_cal.assign(join_key=1),
-#                        on = 'join_key')
-#     prd_cal = prd_cal.drop('join_key', axis=1)
-#     col_cal_list = [
-#         'PRD_CD', 'nenshudo', #'shudo',         'week_from_ymd', 'nendo', 'znen_nendo', 'znen_shudo',
-#         #'holiday_cnt','gw_flag', 'obon_flag', 'nenmatsu_flag'
-#     ]
-    
-#     #if 'prd_nm_kj' in df.columns:
-#     #    df = df.drop('prd_nm_kj', axis=1)
-
-#     df = pd.merge(
-#         df,
-#         prd_cal[col_cal_list],
-#         how='right',
-#         on=['nenshudo', 'PRD_CD']
-#     ).sort_values('nenshudo') #.rename(columns={'休日日数':'店休日数'})
-    
-#     df['URI_SU'] = df['URI_SU'].fillna(0.0)
-#     df['URI_KIN'] = df['URI_KIN'].fillna(0.0)
-#     df['TENPO_CD'] = tenpo_cd
-#     df['DPT_CD'] = dpt
-    
-#     return df
-
-
-#################################
-# Refactored Code: 
-def merge_df_cal(
-    df,
-    df_cal,
-    tenpo_cd,
-    dpt
-):
-    """
-    カレンダー情報と売上データをマージする。
-    Merges calendar information with sales data.
-
-    Args:
-        df (pd.DataFrame): 売上データを含むDataFrame. DataFrame containing sales data.
-        df_cal (pd.DataFrame): カレンダー情報を含むDataFrame. DataFrame containing calendar information.
-        tenpo_cd (int): 店舗コード. Store code.
-        dpt (int): 部門コード. Department code.
-
-    Returns:
-        pd.DataFrame: マージされたDataFrame. The merged DataFrame.
-    """
-    prd_cal = pd.merge(df[['PRD_CD']].drop_duplicates().assign(join_key=1),
-                       df_cal.assign(join_key=1),
-                       on = 'join_key')
-    prd_cal = prd_cal.drop('join_key', axis=1)
-    col_cal_list = [
-        'PRD_CD', 'nenshudo', #'shudo',         'week_from_ymd', 'nendo', 'znen_nendo', 'znen_shudo',
-        #'holiday_cnt','gw_flag', 'obon_flag', 'nenmatsu_flag'
-    ]
-    
-    df = pd.merge(
-        df,
-        prd_cal[col_cal_list],
-        how='right',
-        on=['nenshudo', 'PRD_CD']
-    ).sort_values('nenshudo') #.rename(columns={'休日日数':'店休日数'})
-    
-    df['URI_SU'] = df['URI_SU'].fillna(0.0)
-    df['URI_KIN'] = df['URI_KIN'].fillna(0.0)
-    df['TENPO_CD'] = tenpo_cd
-    df['DPT_CD'] = dpt
-    
-    return df
-            
-            
-#################################
-# Old Code:              
-# def load_tran_df_bq(
-#     df,
-#     tenpo_cd,
-#     dpt,
-#     train_end_nenshudo,
-# ):
-#     #full_path = blob.name
-#     #temp_df = common.extract_as_df(full_path, bucket_name).rename(
-#     #    columns={'NENSHUDO': 'nenshudo', 'BUMON_CD': 'DPT_CD'}
-#     #)
-    
-#     project_id = "dev-cainz-demandforecast"
-#     dataset_id = 'dev_cainz_nssol'
-#     table_id = 'T_090_URIAGE_JSK_NB_SHU_TEN_DPT'
-
-#     my_tenpo_cd = str(tenpo_cd).zfill(4)
-#     bumon_cd = str(dpt).zfill(3)
-    
-#     target_query = f"""  SELECT * FROM {dataset_id}.{table_id} WHERE TENPO_CD = '""" +  my_tenpo_cd + "' AND " + "BUMON_CD = '" + bumon_cd + "' ORDER BY PRD_CD, NENSHUDO"
-#     #print(target_query)
-#     logger.info("target_query", target_query)
-    
-#     if 1:
-#         client = bigquery.Client()
-#         #client = bigquery.Client(project=project_id)
-#         bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#         #bqstorageclient = bigquery_storage.BigQueryStorageClient()
-#         temp_df = (
-#             client.query(target_query)
-#             .result()
-#             .to_dataframe(bqstorage_client=bqstorageclient)
-#         )
-        
-#         #print('DPT:', bumon_cd,' Tranデータ件数:', len(temp_df), )
-#         logger.info('DPT:', bumon_cd,' Tranデータ件数:', len(temp_df), )
-        
-#     else:
-#         temp_df = pd.read_gbq(target_query, project_id, dialect='standard')
-    
-#     temp_df = temp_df.rename(columns={'NENSHUDO': 'nenshudo', 'BUMON_CD': 'DPT_CD'})
-    
-#     temp_df['nenshudo'] = temp_df['nenshudo'].astype(int)
-#     temp_df['PRD_CD'] = temp_df['PRD_CD'].astype(int)
-    
-#     #temp_df = temp_df.loc[(temp_df['TENPO_CD'].isin(tenpo_list)) & (temp_df['nenshudo']<=train_end_nenshudo)]
-#     temp_df = temp_df.loc[temp_df['nenshudo']<=train_end_nenshudo]
-    
-#     df = pd.concat([df, temp_df], axis=0).reset_index(drop=True)
-   
-#     #print("===df12345====",df)
-#     logger.info("===df12345====",df)
-
-#     return df, temp_df["PRD_CD"].unique().tolist()
-
-
-#################################
-# Refactored Code: 
-def load_tran_df_bq(
-    df,
-    tenpo_cd,
-    dpt,
-    train_end_nenshudo, table_id = 'T_090_URIAGE_JSK_NB_SHU_TEN_DPT'
-):
-    """
-    BigQueryからトランザクションデータをロードし、DataFrameに結合する。
-    Loads transaction data from BigQuery and concatenates it with a DataFrame.
-
-    Args:
-        df (pd.DataFrame): 既存のDataFrame. Existing DataFrame.
-        tenpo_cd (int): 店舗コード. Store code.
-        dpt (int): 部門コード. Department code.
-        train_end_nenshudo (int): 学習終了年度. Training end fiscal year.
-
-    Returns:
-        tuple: (結合されたDataFrame, 商品コードのリスト).
-               (Concatenated DataFrame, List of unique product codes).
-    """
-    my_tenpo_cd = str(tenpo_cd).zfill(4)
-    bumon_cd = str(dpt).zfill(3)
-
-    target_query = f""" SELECT * FROM `{dataset_id}.{table_id}` WHERE TENPO_CD = '"{my_tenpo_cd}"' AND BUMON_CD = '"{bumon_cd}"' ORDER BY PRD_CD, NENSHUDO"""
-    # print(target_query)
-    logger.info(f"target_query: {target_query}")
-
-    try:
-        client = bigquery.Client()
-        bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-        temp_df = (
-            client.query(target_query)
-            .result()
-            .to_dataframe(bqstorage_client=bqstorageclient)
-        )
-
-        # print('DPT:', bumon_cd,' Tranデータ件数:', len(temp_df), )
-        logger.info(f'DPT: {bumon_cd}, Tranデータ件数: {len(temp_df)}')
-
-    except Exception as e:
-        logger.exception(f"Error loading data from BigQuery: {e}")
-        raise  # Re-raise the exception
-
-    temp_df = temp_df.rename(columns={'NENSHUDO': 'nenshudo', 'BUMON_CD': 'DPT_CD'})
-
-    temp_df['nenshudo'] = temp_df['nenshudo'].astype(int)
-    temp_df['PRD_CD'] = temp_df['PRD_CD'].astype(int)
-
-    temp_df = temp_df.loc[temp_df['nenshudo'] <= train_end_nenshudo]
-
-    df = pd.concat([df, temp_df], axis=0).reset_index(drop=True)
-
-    # print("===df12345====",df)
-    logger.info(f"===df12345==== {df}")
-
-    return df, temp_df["PRD_CD"].unique().tolist()
-
-
-            
-            
-# if THEME_MD_MODE:
-    
-#     pass
-    
-#     '''
-#     # BQに取り置きしていない商品の販売データを加える処理!!!!!!!!!!!!!!!!!
-    
-#     #path_add_salesdata = "Basic_Analysis_unzip_result/01_Data/91_ADD_DATA_thememd/T_090_URIAGE_JSK_4901140898044_to202435week.csv"
-#     path_add_salesdata = "Basic_Analysis_unzip_result/01_Data/91_ADD_DATA_thememd/T_090_URIAGE_JSK_4901140898044_to202436week.csv"
-#     add_salesdata_df = common.extract_as_df(path_add_salesdata, bucket_name)
-
-#     add_salesdata_df['nenshudo'] = add_salesdata_df['nendo'].astype(int) * 100 + add_salesdata_df['shudo'].astype(int)
-    
-#     add_salesdata_df['tenpo_cd'] = add_salesdata_df['tenpo_cd'].astype(int)
-    
-#     add_salesdata_df_gbsum = add_salesdata_df.groupby(['tenpo_cd', 'prd_cd', 'nenshudo']).sum()[['su', 'kingaku']].reset_index()
-#     add_salesdata_df_gbsum = add_salesdata_df_gbsum.rename(columns={'su':'URI_SU', 'kingaku':'URI_KIN'})
-#     add_salesdata_df_gbsum['BAIKA'] = add_salesdata_df_gbsum['URI_KIN'] / add_salesdata_df_gbsum['URI_SU']
-    
-#     # 追加する商品コードリスト
-#     add_prdcd_list = add_salesdata_df['prd_cd'].unique().tolist()
-#     add_prdcd_list_str = ''
-#     for i, pcd in enumerate(add_prdcd_list):
-#         if i == 0:
-#             add_prdcd_list_str = "'" + str(pcd) + "'"
-#         else:
-#             add_prdcd_list_str = add_prdcd_list_str + ', ', + "'" + str(pcd) + "'"
-     
-#     # 追加する商品コードリストの商品マスタを取得
-#     client = bigquery.Client()
-#     bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#     target_query = f"""  SELECT * FROM {dataset_id}.M_090_PRD where PRD_CD in({add_prdcd_list_str})"""  
-#     #print(target_query)
-#     logger.info("target_query", target_query)
-#     my_dfm_base = (
-#         client.query(target_query)
-#         .result()
-#         .to_dataframe(bqstorage_client=bqstorageclient)
-#     )
-
-#     my_dfm_base['PRD_CD'] = my_dfm_base['PRD_CD'].astype(int)
-#     my_dfm_base['BUMON_CD'] = my_dfm_base['BUMON_CD'].astype(int)
-#     my_dfm_base['cls_cd'] = my_dfm_base['cls_cd'].astype(int)
-    
-
-#     add_salesdata_df_gbsum = pd.merge(add_salesdata_df_gbsum, 
-#                                 my_dfm_base[['PRD_CD', 'BUMON_CD']].rename(columns={'PRD_CD':'prd_cd', 'BUMON_CD':'DPT_CD'}), 
-#                                 on='prd_cd', how='left')
-    
-#     add_salesdata_df_gbsum = add_salesdata_df_gbsum.rename(columns={'tenpo_cd':'TENPO_CD', 'prd_cd':'PRD_CD'})
-    
-    
-    
-#     col_dict = {}
-#     for col in my_dfm_base.columns:
-#         col_dict[col] = col.lower()
-#     my_dfm_base = my_dfm_base.rename(columns=col_dict)
-    
-#     collist = dfm_base.columns
-    
-#     my_dfm_base = my_dfm_base[collist]
-#     dfm_base = pd.concat([dfm_base, my_dfm_base])
-
-    
-#     # 商品マスタを、テーマMDの商品に限定する
-#     #dfm_base = dfm_base[dfm_base['prd_cd'].isin(theme_md_prdcd_list)]
-    
-#     #対象dptを取り出す
-    
-#     dpt_list = dfm_base[dfm_base['prd_cd'].isin(theme_md_prdcd_list)]['bumon_cd'].unique().tolist()
-#     #print("**********************")
-#     #print('theme md dpt_list:', dpt_list)
-#     #print("**********************")
-#     logger.info("**********************")
-#     logger.info('theme md dpt_list: %s', dpt_list)  # Use %s to insert the value of dpt_list
-#     logger.info("**********************")
-    
-    
-#     '''
-    
-
-            
-#################################
-# Old Code:   
-# dfc_tmp_for_merge = dfc_tmp[(dfc_tmp["nenshudo"] >= 201701)&(dfc_tmp["nenshudo"] < end_nenshudo)] [['nenshudo']].reset_index(drop=True)    
-            
-# for tenpo in tenpo_list: 
-#     # 販売期間マスタに登録されていないケースパックバラのレコードを追加する
-#     selling_period = selling_period_all[selling_period_all['tenpo_cd']==int(tenpo)].reset_index(drop=True)
-#     add_low_list = [selling_period]
-
-#     sp_prdc_cd_list = selling_period['prd_cd'].tolist()
-#     for prd_cd in selling_period['prd_cd'].tolist():
-#         if prd_cd in prdcd_grp:
-#             for g_prd_cd in prdcd_grp[prd_cd]:
-#                 if (prd_cd != g_prd_cd) and (g_prd_cd not in sp_prdc_cd_list):
-#                     temp_record = copy.deepcopy(selling_period[selling_period['prd_cd']==prd_cd])
-#                     temp_record['prd_cd'] = g_prd_cd
-#                     add_low_list.append(temp_record)
-
-#     selling_period = pd.concat(add_low_list)               
-#     # ここまで　
-    
-#     product_info_df_list = []
-#     df_value_count_ret_list = []
-#     jan_mapping_df_list = []
-#     subject_jan_master_list = []
-    
-    
-#     # BQから一括でデータをロードする
-#     if bq_allow_large_results:
-#         project_id = "dev-cainz-demandforecast"
-#         dataset_id = "dev_cainz_nssol"
-#         table_id = "T_090_URIAGE_JSK_NB_SHU_TEN_DPT"
-#         my_tenpo_cd = str(tenpo_cd).zfill(4)
-#         dest_str = f"""dev-cainz-demandforecast.test_data.temp_T_090_URIAGE_JSK_NB_SHU_TEN_DPT_{my_tenpo_cd}"""
-        
-#         client = bigquery.Client()        
-#         client.delete_table(dest_str, not_found_ok=True)
-        
-#         client = bigquery.Client()
-#         bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-#         job_config = bigquery.QueryJobConfig(
-#             allow_large_results=True, 
-#             destination=dest_str, 
-#             use_legacy_sql=False
-#         )
-#         query = f"""
-#         SELECT * FROM `{project_id}.{dataset_id}.{table_id}` WHERE TENPO_CD = '{my_tenpo_cd}'
-#         """
-#         df_sales = client.query(query, job_config=job_config).result().to_dataframe(bqstorage_client=bqstorageclient)
-#         df_sales = df_sales.rename(columns={'NENSHUDO': 'nenshudo', 'BUMON_CD': 'DPT_CD'})
-
-#         df_sales['nenshudo'] = df_sales['nenshudo'].astype(int)
-#         df_sales['PRD_CD'] = df_sales['PRD_CD'].astype(int)
-#         df_sales['DPT_CD'] = df_sales['DPT_CD'].astype(int)
-#         df_sales['TENPO_CD'] = df_sales['TENPO_CD'].astype(int)
-        
-#         df_sales = df_sales.loc[df_sales['nenshudo']<=end_nenshudo]
-    
-    
-    
-#     for dpt in dpt_list:
-        
-#         #print('dpt:', dpt, ' process start *************************')
-#         logger.info('dpt:', dpt, ' process start *************************')
-        
-# #        logger = common.get_logger("集計処理 tenpo: {}, dpt: {} ".format(tenpo, dpt))
-# #        logger.info("start")
-#         start_time = time.time()
-#         dpt = int(dpt)
-#         if dpt not in exclusion_dpt_list:
-            
-#             tmp_df_bunrui = df_bunrui.loc[df_bunrui['dpt_cd']==dpt]
-#             if len(tmp_df_bunrui) == 0:
-#                 continue
-            
-#             dpt_name = df_bunrui.loc[df_bunrui['dpt_cd']==dpt]['dpt_nm'].unique()[0]
-            
-#             temp_dpt_df = pd.DataFrame()
-
-#             # データ探索のためにパスを設定
-#             df = pd.DataFrame()
-#             dfm = pd.DataFrame()
-
-#             # データのロード
-#             if bq_allow_large_results:
-#                 df = df_sales[df_sales['DPT_CD']==dpt].reset_index(drop=True)
-#                 ret_prd_list = df["PRD_CD"].unique().tolist()
-#             else:
-                
-#                 if 0:
-#                     pass
-#                     '''
-#                     df, ret_prd_list = load_tran_df_bq(
-#                         df,
-#                         tenpo,
-#                         dpt,
-#                         end_nenshudo,
-#                     ) 
-#                     # チャンスロス対応
-#                     if add_chanceloss_urisu:
-#                         if len(df) > 0:
-#                             #チャンスロス結合
-#                             df = merge_df_cal(df, dfc_tmp_for_merge, tenpo, dpt)
-#                             df = pd.merge(df,chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-#                             df['CHANCE_LOSS_PRD_SU'] = df['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-#                             df['CHANCE_LOSS_KN'] = df['CHANCE_LOSS_KN'].fillna(0.0)
-
-#                             df['URI_SU_ORG'] = df['URI_SU']
-#                             df['URI_SU'] = df['URI_SU'] + df['CHANCE_LOSS_PRD_SU']
-#                             df['URI_KIN'] = df['URI_KIN'] + df['CHANCE_LOSS_KN']
-#                             df['BAIKA'][df['BAIKA'].isnull()] = df['CHANCE_LOSS_KN'] / df['CHANCE_LOSS_PRD_SU']
-#                             df['URI_SU'] = df['URI_SU'].astype(float)
-#                             df = df[df['URI_SU']>0.0].reset_index(drop=True)
-#                     '''
-#                 else:
-#                     for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, dpt)):
-#                         df, ret_prd_list = short_term_preprocess_common.load_tran_df(
-#                             df,
-#                             blob,
-#                             bucket_name,
-#                             tenpo_list,
-#                             #train_end_nenshudo,
-#                             end_nenshudo,
-#                             []
-#                         )
-#                         #print("===df1======",df)
-
-#                         # チャンスロス対応
-#                         if add_chanceloss_urisu:
-#                             if len(df) > 0:
-#                                 #チャンスロス結合
-#                                 df = merge_df_cal(df, dfc_tmp_for_merge, tenpo, dpt)
-#                                 df = pd.merge(df,chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-#                                 df['CHANCE_LOSS_PRD_SU'] = df['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-#                                 df['CHANCE_LOSS_KN'] = df['CHANCE_LOSS_KN'].fillna(0.0)
-
-#                                 df['URI_SU_ORG'] = df['URI_SU']
-#                                 df['URI_SU'] = df['URI_SU'] + df['CHANCE_LOSS_PRD_SU']
-#                                 df['URI_KIN'] = df['URI_KIN'] + df['CHANCE_LOSS_KN']
-#                                 df['BAIKA'][df['BAIKA'].isnull()] = df['CHANCE_LOSS_KN'] / df['CHANCE_LOSS_PRD_SU']
-#                                 df['URI_SU'] = df['URI_SU'].astype(float)
-#                                 df = df[df['URI_SU']>0.0].reset_index(drop=True)
-                                
-
-#                     if THEME_MD_MODE:
-                        
-#                         #print('gggg')
-#                         #sys.exit()
-                        
-                        
-#                         # 花王の商品をまず抽出
-#                         # 4901301-で始まる
-#                         # 4973167-で始まる
-
-#                         df['PRD_CD_PREFIX'] = df['PRD_CD'] / 1000000.0
-#                         df['PRD_CD_PREFIX'] = df['PRD_CD_PREFIX'].astype(int)
-
-#                         df_ex1 = df[(df['PRD_CD_PREFIX']==4901301)|(df['PRD_CD_PREFIX']==4973167)].reset_index(drop=True)
-
-#                         if len(df_ex1) > 0:            
-#                             #cls_cd_list1 = df_ex1['cls_cd'].unique().tolist()
-
-#                             # 同クラスにあるP&G、ライオンの商品も抽出する
-#                             # P&G
-#                             # 4902430-で始まる
-#                             # 4987176-で始まる
-#                             # ライオン
-#                             # 4903301-で始まる
-#                             df_ex2 = df[
-#                                 #df['cls_cd'].isin(cls_cd_list1)
-#                                 #&
-#                                  (df['PRD_CD_PREFIX']==4902430)
-#                                 |(df['PRD_CD_PREFIX']==4987176)
-#                                 |(df['PRD_CD_PREFIX']==4903301)
-#                             ]
-#                             if len(df_ex2) > 0:
-#                                 df = pd.concat([df_ex1, df_ex2]).reset_index(drop=True)
-#                             else:
-#                                 df = df_ex1
-
-                        
-                    
-#                         '''
-#                         # CSVから追加した商品データにチャンスロスを加算する処理
-#                         my_add_salesdata_df_gbsum = add_salesdata_df_gbsum[
-#                                                          (add_salesdata_df_gbsum['DPT_CD']==dpt)
-#                                                         &(add_salesdata_df_gbsum['TENPO_CD']==tenpo)]
-                        
-#                         if len(my_add_salesdata_df_gbsum) > 0:                            
-#                             # チャンスロス対応
-#                             if add_chanceloss_urisu:
-#                                 #チャンスロス結合
-                                
-#                                 my_add_salesdata_df_gbsum = merge_df_cal(my_add_salesdata_df_gbsum, dfc_tmp_for_merge, tenpo, dpt)
-                                
-#                                 my_add_salesdata_df_gbsum = pd.merge(my_add_salesdata_df_gbsum,chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-#                                 my_add_salesdata_df_gbsum['CHANCE_LOSS_PRD_SU'] = my_add_salesdata_df_gbsum['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-#                                 my_add_salesdata_df_gbsum['CHANCE_LOSS_KN'] = my_add_salesdata_df_gbsum['CHANCE_LOSS_KN'].fillna(0.0)
-
-#                                 my_add_salesdata_df_gbsum['URI_SU_ORG'] = my_add_salesdata_df_gbsum['URI_SU']
-#                                 my_add_salesdata_df_gbsum['URI_SU'] = my_add_salesdata_df_gbsum['URI_SU'] + my_add_salesdata_df_gbsum['CHANCE_LOSS_PRD_SU']
-#                                 my_add_salesdata_df_gbsum['URI_KIN'] = my_add_salesdata_df_gbsum['URI_KIN'] + my_add_salesdata_df_gbsum['CHANCE_LOSS_KN']
-#                                 my_add_salesdata_df_gbsum['BAIKA'][my_add_salesdata_df_gbsum['BAIKA'].isnull()] = my_add_salesdata_df_gbsum['CHANCE_LOSS_KN'] / my_add_salesdata_df_gbsum['CHANCE_LOSS_PRD_SU']
-#                                 my_add_salesdata_df_gbsum['URI_SU'] = my_add_salesdata_df_gbsum['URI_SU'].astype(float)
-#                                 my_add_salesdata_df_gbsum = my_add_salesdata_df_gbsum[my_add_salesdata_df_gbsum['URI_SU']>0.0].reset_index(drop=True)
-
-#                             df = pd.concat([df, my_add_salesdata_df_gbsum])
-#                         '''        
-                        
-                        
-                        
-                        
-                        
-            
-#             if len(df)==0:
-#                 #print(' After read tran data df size=0 Warning')
-#                 logger.warning('After read tran data df size=0 Warning: Possible data loading issue or empty source.')
-
-
-            
-            
-#             #df_afterread = copy.deepcopy(df)
-            
-            
-#             add_dept_prd_list = []
-            
-#             if len(df)!=0:
-                
-#                 if use_jan_connect:
-#                     ###
-#                     # JANの差し替え指示をさかのぼり対象となるJANを確認
-                    
-#                     # DFのJANコードから差替え指示をさかのぼり、全部関係のあるJANリストと、差し替え指示を取得
-#                     # なぜここで'how_change'が6, 10, 11を除外しないのか？ *****************
-#                     subject_prod_list, subject_jan_master = short_term_preprocess_common.get_subject_jan_master(
-#                         df,
-#                         jan_master
-#                     )
-#                     #print("===df2======",df)
-#                     logger.info("===df2======",df)
-
-#                     # 差し替え指示が無ければパスする
-#                     # 差し替え指示があれば紐づくDPTを抽出
-#                     if len(subject_jan_master)!=0:
-#                         new_dpt_list, old_dpt_list, subject_dpt_list = short_term_preprocess_common.get_new_old_dpt_list(
-#                             subject_jan_master,
-#                             subject_prod_list,
-#                         )
-#                         # 現在ロードしているDPTに関しては必要ないので外す
-#                         subject_dpt_list.remove(dpt)
-                        
-#                         # チャンスロス対応
-#                         if add_chanceloss_urisu:
-#                             # 関係するDPTかつ関係する製品データを追加でロード
-#                             #add_dept_prd_list = [] #20230921 上に移動
-#                             dft = pd.DataFrame()
-#                             for temp_dpt in subject_dpt_list:
-#                                 temp_dpt = int(temp_dpt)
-                                
-#                                 if 0:
-#                                     dft, ret_prd_list = load_tran_df_bq(
-#                                         dft,
-#                                         tenpo,
-#                                         temp_dpt,
-#                                         end_nenshudo,
-#                                     ) 
-#                                     add_dept_prd_list = add_dept_prd_list + ret_prd_list
-#                                 else:
-#                                     for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, temp_dpt)):
-#                                         dft, ret_prd_list = short_term_preprocess_common.load_tran_df(
-#                                             dft,
-#                                             blob,
-#                                             bucket_name,
-#                                             tenpo_list,
-#                                             #train_end_nenshudo,
-#                                             end_nenshudo,
-#                                             subject_prod_list
-#                                         )
-#                                         add_dept_prd_list = add_dept_prd_list + ret_prd_list                            
-                            
-#                             #チャンスロス結合
-#                             if len(dft) > 0:
-#                                 dft = merge_df_cal(dft, dfc_tmp_for_merge, tenpo, dpt)
-#                                 dft = pd.merge(dft, chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-#                                 dft['CHANCE_LOSS_PRD_SU'] = dft['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-#                                 dft['CHANCE_LOSS_KN'] = dft['CHANCE_LOSS_KN'].fillna(0.0)
-#                                 dft['URI_SU_ORG'] = dft['URI_SU']
-#                                 dft['URI_SU'] = dft['URI_SU'] + dft['CHANCE_LOSS_PRD_SU']
-#                                 dft['URI_KIN'] = dft['URI_KIN'] + dft['CHANCE_LOSS_KN']
-#                                 dft['BAIKA'][dft['BAIKA'].isnull()] = dft['CHANCE_LOSS_KN'] / dft['CHANCE_LOSS_PRD_SU']
-#                                 dft['URI_SU'] = dft['URI_SU'].astype(float)
-#                                 dft = dft[dft['URI_SU']>0.0].reset_index(drop=True)
-#                                 df = pd.concat([df, dft], axis=0).reset_index(drop=True)
-                            
-#                         else:
-#                             # 関係するDPTかつ関係する製品データを追加でロード
-#                             #add_dept_prd_list = [] #20230921 上に移動
-#                             for temp_dpt in subject_dpt_list:
-#                                 temp_dpt = int(temp_dpt)
-                                
-#                                 if 0:
-#                                     df, ret_prd_list = load_tran_df_bq(
-#                                         df,
-#                                         tenpo,
-#                                         temp_dpt,
-#                                         end_nenshudo,
-#                                     ) 
-#                                     add_dept_prd_list = add_dept_prd_list + ret_prd_list
-                                    
-#                                 else:
-#                                     for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, temp_dpt)):
-#                                         df, ret_prd_list = short_term_preprocess_common.load_tran_df(
-#                                             df,
-#                                             blob,
-#                                             bucket_name,
-#                                             tenpo_list,
-#                                             #train_end_nenshudo,
-#                                             end_nenshudo,
-#                                             subject_prod_list
-#                                         )
-#                                         add_dept_prd_list = add_dept_prd_list + ret_prd_list
-                                
-                                
-#                 # 最新の商品が何かを確認するためにマスターに販売期間マスターをマージする
-# #                dfm = pd.merge(
-# #                    dfm_base.rename(columns={"prd_cd":"PRD_CD"}),
-# #                    tanawari[tanawari["tenpo_cd"] == tenpo][["tenpo_cd", "prd_cd", "tanagae_hokoku_day", 'hacchu_to_ymd']].rename(columns={"tenpo_cd":"TENPO_CD", "prd_cd":"PRD_CD", "tanagae_hokoku_day":"sell_start_ymd", 'hacchu_to_ymd':'hacchu_end_ymd'}),
-# #                    on=['PRD_CD'],
-# #                    how='inner'
-# #                )
-
-
-#                 #print("===df3======",df)
-#                 logger.info("===df3======",df)
-    
-    
-#                 #print('test exit')
-#                 #sys.exit()
-            
-            
-#                 # 他のDPTに紐づけられる商品は除かなくてはならない・・・・・・・・・・・・・・
-                
-#                 #こんなケース
-#                 #old_jan	latest_jan
-#                 #4549509426202 	4901983805599 
-#                 #4549509003038 	4901983805599 
-#                 #4549509426202 	4901983805599 
-#                 #
-#                 #差替え先4901983805599はDPT63 　差し替え元はDPT88
-                
-#                 #DPT63の処理のとき、sum条件にdptが入っているので差し替え元JANはdpt88で残ってしまう
-                
-#                 #DPT88の処理のとき、4549509003038はdpt88で残ってしまう（4901983805599はもともと無い）
-                
-#                 #JANが新しいものに書き換わっていない？？？？
-                
-                
-
-#                 #################################################
-#                 #dftest1_1 = copy.deepcopy(df)
-#                 #################################################
-                
-    
-#                 if THEME_MD_MODE:
-#                     dfm = pd.merge(
-#                         dfm_base.rename(columns={"prd_cd":"PRD_CD"}),                    
-#                         selling_period[selling_period["tenpo_cd"] == tenpo][["tenpo_cd", "prd_cd", "tanagae_hokoku_day", 'hacchu_to_ymd']].rename(columns={"tenpo_cd":"TENPO_CD", "prd_cd":"PRD_CD", "tanagae_hokoku_day":"sell_start_ymd", 'hacchu_to_ymd':'hacchu_end_ymd'}),
-#                         on=['PRD_CD'],
-#                         how='left' # 販売期間を見ないようにしたいのでleftにする
-#                     )
-                
-#                     dfm['sell_start_ymd'] = dfm['sell_start_ymd'].fillna(dfm['sell_start_ymd'].min())
-#                     dfm['hacchu_end_ymd'] = dfm['hacchu_end_ymd'].fillna(dfm['hacchu_end_ymd'].max())
-#                     dfm['TENPO_CD'] = dfm['TENPO_CD'].fillna(tenpo)
-
-                    
-#                     # テーマMD商品に限定した商品マスタを作成して、DFにマージする
-#                     #my_dfm = dfm[dfm['PRD_CD'].isin(theme_md_prdcd_list)]
-
-#                     df = pd.merge(
-#                         dfm[["PRD_CD", "TENPO_CD", "sell_start_ymd", "hacchu_end_ymd", "bumon_cd"]], # 20230731 部門コードを追加
-#                         df,
-#                         on=["PRD_CD", "TENPO_CD"],
-#                         how='inner'
-#                     )
-                    
-                    
-            
-#                 else:
-#                     dfm = pd.merge(
-#                         dfm_base.rename(columns={"prd_cd":"PRD_CD"}),                    
-#                         selling_period[selling_period["tenpo_cd"] == tenpo][["tenpo_cd", "prd_cd", "tanagae_hokoku_day", 'hacchu_to_ymd']].rename(columns={"tenpo_cd":"TENPO_CD", "prd_cd":"PRD_CD", "tanagae_hokoku_day":"sell_start_ymd", 'hacchu_to_ymd':'hacchu_end_ymd'}),
-#                         on=['PRD_CD'],
-#                         how='inner'
-#                     )
-        
-            
-#                     df = pd.merge(
-#                         dfm[["PRD_CD", "TENPO_CD", "sell_start_ymd", "hacchu_end_ymd", "bumon_cd"]], # 20230731 部門コードを追加
-#                         df,
-#                         on=["PRD_CD", "TENPO_CD"],
-#                         how='inner'
-#                     )
-                
-#                 #dftest3 = copy.deepcopy(df)
-
-#                 #print("===df4======",df)
-#                 logger.info("===df4======",df)
-                
-#                 #if use_jan_connect:
-                    
-#                 # JANの書き換え処理
-#                 # 差し替え指示が無ければパスする
-#                 #if len(subject_jan_master) != 0:
-#                 if 1:
-                    
-#                     # DPTを全て書き換える********************************
-#                     df['DPT_CD'] = dpt
-                                                            
-#                     # **************** 20230516追加
-#                     # ケースパックバラJAN書き換え前に、製品/年週度ごとの売価をとっておく
-#                     dfgb = df[['TENPO_CD', 'PRD_CD', 'nenshudo', 'BAIKA']].groupby(['TENPO_CD', 'PRD_CD', 'nenshudo']).mean()
-#                     dfgb.columns = ['BAIKA_NEW']
-
-#                     # ケースパックバラのJANコードを発注JANに書き替える
-#                     df = pd.merge(df, prdcd_hattyujan_df, on='PRD_CD', how='left')
-#                     df.loc[~df['HACCHU_JAN'].isnull(), 'PRD_CD'] = df['HACCHU_JAN']
-                    
-                    
-#                     #dftest3_1 = copy.deepcopy(df)
-                    
-                    
-#                     # 発注JANに差し替えたものは、売価も発注JANの売価に差し替える
-#                     df = pd.merge(df, dfgb, on=['TENPO_CD', 'PRD_CD', 'nenshudo'], how='left')
-#                     df['BAIKA_OLD'] = df['BAIKA']
-#                     df.loc[~df['HACCHU_JAN'].isnull(), 'BAIKA'] = df['BAIKA_NEW']
-                    
-#                     #dftest3_2 = copy.deepcopy(df)
-                    
-#                     # ソートする
-#                     #df = df.sort_values(by=['TENPO_CD', 'PRD_CD', 'nenshudo'])
-#                     df = df.sort_values(by=['TENPO_CD', 'PRD_CD', 'nenshudo']).reset_index(drop=True)
-#                     df['URI_SU'] = df['URI_SU'].astype(float)
-#                     df['HJAN_COEF'] = df['HJAN_COEF'].astype(float)
-
-                    
-                    
-#                     # 売価の補完をおこなう
-#                     df['BAIKA'] = df[['TENPO_CD', 'PRD_CD', 'BAIKA']].groupby(['TENPO_CD', 'PRD_CD'])['BAIKA'].transform(lambda x: x.interpolate(limit_direction='both'))
-                    
-#                     # 元々発注JANが売られていない商品は、元JANの売価を係数で割って売価とする
-#                     df.loc[df['BAIKA'].isnull(), 'BAIKA'] = df['BAIKA_OLD'] / df['HJAN_COEF']
-
-#                     # 売り数に発注JANへの変換係数をかける
-#                     df.loc[~df['HACCHU_JAN'].isnull(), 'URI_SU'] = df['URI_SU'] * df['HJAN_COEF']
-#                     # 売り金額はそのままでよい
-                        
-                    
-#                     df = df.drop(['HACCHU_JAN'], axis=1)
-#                     df = df.drop(['HJAN_COEF'], axis=1)
-#                     df = df.drop(['BAIKA_NEW'], axis=1)
-#                     df = df.drop(['BAIKA_OLD'], axis=1)
-                    
-#                     #dftest3_3 = copy.deepcopy(df)
-
-#                     if use_jan_connect:
-                        
-#                         #dftest4 = copy.deepcopy(df)
-
-#                         # 'how_change'が6, 10, 11を除外、重複削除
-#                         # 販売期間マスタ（hacchu_end_ymd）を結合、keyはnew_JAN
-#                         subject_jan_master = short_term_preprocess_common.filtering_jan_master_for_rewriting_jan(
-#                             subject_jan_master,
-#                             dfm
-#                         )
-                        
-                        
-                        
-#                         if seisan_tenpo_hattyuu_end_is_not_replaced:
-#                             # 生産発注終了日、店舗発注終了日をみて、終了していない差替え元商品の差替え情報を除くため
-#                             # 商品マスタを結合
-#                             # 商品マスタ（生産発注開始終了日、店舗発注開始終了日）を結合
-#                             dfm_base['seisan_hacchu_tekiyo_to_ymd'] = dfm_base['seisan_hacchu_tekiyo_to_ymd'].fillna(99999999)
-#                             dfm_base['tenpo_hacchu_to_ymd_toitsu'] = dfm_base['tenpo_hacchu_to_ymd_toitsu'].fillna(99999999)
-#                             dfm_base['seisan_hacchu_tekiyo_to_ymd'] = dfm_base['seisan_hacchu_tekiyo_to_ymd'].astype(int)
-#                             dfm_base['tenpo_hacchu_to_ymd_toitsu'] = dfm_base['tenpo_hacchu_to_ymd_toitsu'].astype(int)  
-                            
-#                             subject_jan_master = pd.merge(subject_jan_master, dfm_base.rename(columns={'prd_cd':'old_JAN'}), on='old_JAN', how='left').reset_index(drop=True)
-
-#                             # 店舗別の生産発注停止情報を結合
-                            
-#                             #金子さんコメント
-#                             #個店単位で発注終了日を見るのであれば、
-#                             #M030PRD_TEN_TNPN_INFから、PRD_CDとTENPO_CDでターゲットを確定させ、HACCHU_YMD_SEQ_NOを取得して
-#                             #M030HACCHU_YMD_INFから、PRD_CDとHACCHU_YMD_SEQ_NOで結合した結果、HACCHU_TO_YMDが本日以前のものをとる
-#                             #が、短期の場合のあるべき発注終了の判定かと！
-                            
-#                             #store_prd_hacchu_ymd = common.extract_as_df(path_tenpo_hacchu_master, bucket_name)
-#                             #store_prd_hacchu_ymd['TENPO_CD'] = store_prd_hacchu_ymd['TENPO_CD'].astype(int)
-#                             #store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].fillna(99999999)
-#                             #store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].astype(int)
-#                             my_store_prd_hacchu_ymd = store_prd_hacchu_ymd[store_prd_hacchu_ymd['TENPO_CD']==int(tenpo)].reset_index(drop=True)
-#                             subject_jan_master = pd.merge(subject_jan_master, my_store_prd_hacchu_ymd.rename(columns={'PRD_CD':'old_JAN'}), on='old_JAN', how='left').reset_index(drop=True)
-                        
-   
-#                         # 'hacchu_end_ymd'==99999999の新JANと、それに関連するすべてのJANを取得する
-#                         newest_jan_list = short_term_preprocess_common.get_newest_jan_list(
-#                             subject_jan_master,
-#                             my_date
-#                         )
-                        
-#                         # newest_jan_listにあるが、DPTが違うものは除外すべきでは？ *****************
-                        
-#                         #  ・add_dept_prd_listには他DPTから追加した製品番号
-#                         #        DFに含まれる製品に関する差替え指示からの新JANと関連する旧JANのリストで、他DPTの製品
-#                         #        なぜここで'how_change'が6, 10, 11を除外しないのか？ *****************                        
-                        
-#                         #  newest_jan_listには、
-#                         #        DFに関連する差替え指示からの新JANと関連する旧JANが入っている
-#                         #        'hacchu_end_ymd'==99999999の新JANと、それに関連するすべてのJANを取得する
-#                         #        'how_change'が6, 10, 11の差替えを除外
-                        
-#                         #dftest4_2 = copy.deepcopy(df)
-                        
-#                         # add_dept_prd_listにあるがnewest_jan_listに無いSKUを除外する
-#                         del_prd_list = list(set(add_dept_prd_list) - set(newest_jan_list))
-#                         df = df[~df['PRD_CD'].isin(del_prd_list)]
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-#                         # **********************************************************************************
-#                         # DFのPRD_CDで、商品マスタ上、処理対象のDPTでないものを除く 20230731追加
-#                         df = df[df['bumon_cd']==dpt]
-#                         df = df.drop(['bumon_cd'], axis=1).reset_index(drop=True)
-#                         # **********************************************************************************
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-                        
-#                         #dftest4_3 = copy.deepcopy(df)
-                        
-#                         #print('test exit')
-#                         #sys.exit()
-                        
-                        
-#                         # JAN書き換え*********************************************************
-                        
-#                         # 4549509003038 	4901983805599 	どちらもnewestにしかない
-                        
-#                         df, jan_mapping_df = short_term_preprocess_common.rewrite_jan_code(
-#                             subject_jan_master,
-#                             newest_jan_list,
-#                             df,
-#                             'PRD_CD',
-#                             my_date,
-#                             restrict_old_jan_1generation=restrict_old_jan_1generation_flag,
-#                             seisan_tenpo_hattyuu_end_is_not_replaced=seisan_tenpo_hattyuu_end_is_not_replaced
-#                         )
-                        
-#                         jan_mapping_df_list.append(jan_mapping_df)
-#                         subject_jan_master_list.append(subject_jan_master)
-                        
-#                         #jan_mapping_df.to_csv('jan_mapping_df_' + str(tenpo) + '.csv', index=False)
-                    
-#                         #dftest5 = copy.deepcopy(df)
-                    
-                    
-                    
-#                     # groupby処理
-#                     # 販売開始日は一番古いもの、販売終了は一番新しものにする
-#                     prod_info_df = df[['PRD_CD', 'TENPO_CD', 'DPT_CD', 'sell_start_ymd', 'hacchu_end_ymd']]
-#                     prod_info_df = prod_info_df.drop_duplicates()
-#                     prod_info_df = prod_info_df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD']).agg({
-#                         'sell_start_ymd':'min',
-#                         'hacchu_end_ymd':'max'
-#                     }).reset_index()
-                    
-                    
-#                     df = df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD', 'nenshudo']).agg({'URI_SU':'sum','URI_KIN':'sum', 'BAIKA':'mean'}).reset_index()
-#                     #df = df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD', 'nenshudo']).agg({'URI_SU':'sum','URI_KIN':'sum'}).reset_index()
-                    
-                    
-#                     #dftest5_3 = copy.deepcopy(df)
-                    
-#                     df = pd.merge(df, prod_info_df, on=['PRD_CD', 'TENPO_CD', 'DPT_CD'], how='inner')
-
-                    
-#                     ###################################################
-#                     #dftest6 = copy.deepcopy(df)
-#                     ###################################################
-                    
-                    
-#                     #print('test2 exit')
-#                     #sys.exit()
-                
-                
-#                 # 商品情報の結合
-#                 #print("===df5======",df)
-#                 logger.info("===df5======",df)
-#                 df = pd.merge(
-#                     dfm[[
-#                         "PRD_CD","prd_nm_kj", "hnmk_cd", "cls_cd", "line_cd", "shoki_genka", 
-#                         "shoki_baika", "genka_toitsu", "baika_toitsu", "low_price_kbn"
-#                     ]],
-#                     df,
-#                     on="PRD_CD",
-#                     how="inner"
-#                 )
-                
-#                 #dftest7 = copy.deepcopy(df)
-                
-                
-#                 df = pd.merge(df, df_bunrui[['cls_cd', 'cls_nm']], on='cls_cd', how='inner')
-                
-                
-#                 #dftest8 = copy.deepcopy(df)
-                
-#                 #print("===df6======",df)
-#                 logger.info("===df6======",df)
-#                 ###
-#                 df_cal = pd.DataFrame(dfc["nenshudo"].drop_duplicates().sort_values().reset_index(drop=True))
-#                 df_cal = dfc[
-#                     (dfc["nenshudo"]>=start_nenshudo) & \
-#                     (dfc["nenshudo"]<=end_nenshudo)
-#                 ][["nenshudo","shudo","week_from_ymd"]].reset_index(drop=True)
-#                 df_cal["date"] = df_cal["week_from_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-#                 df_cal = pd.merge(df_cal, dfc[['nenshudo', 'nendo', 'znen_nendo', 'znen_shudo','minashi_tsuki']], on='nenshudo')
-#                 df_cal = df_cal.loc[
-#                     (df_cal['nenshudo']>=start_nenshudo)&\
-#                     (df_cal['nenshudo']<=end_nenshudo)
-#                 ].reset_index(drop=True)
-#                 ###
-                
-#                 #dftest9 = copy.deepcopy(df)
-
-#                 if not THEME_MD_MODE:
-#                     # 発注終了が無い商品は除外
-#                     df = df.loc[(~df["hacchu_end_ymd"].isnull())].reset_index(drop=True)
-               
-#                 #dftest10 = copy.deepcopy(df)
-            
-#                 #print("===========df7===========",df)
-#                 logger.info("===========df7===========",df)
-
-#                 # JAN結合後データを店舗で絞る
-#                 unique_tenpo_df = df.loc[df['TENPO_CD']==tenpo].reset_index(drop=True)
-                
-                
-                
-                
-                
-                
-                
-#                 # **********************************************************************************
-#                 # DFのPRD_CDで、商品マスタ上、処理対象のDPTでないものを除く 20230826追加
-#                 my_bumon_cd_prdcd_list = list(set(dfm_base[dfm_base['bumon_cd']==dpt]['PRD_CD']))
-#                 unique_tenpo_df = unique_tenpo_df[unique_tenpo_df['PRD_CD'].isin(my_bumon_cd_prdcd_list)].reset_index(drop=True)
-#                 # **********************************************************************************
-                
-                
-                
-                
-                
-                
-                
-                
-#                 if not THEME_MD_MODE:
-#                     # 発注終了していないものに絞る
-#                     unique_tenpo_df = unique_tenpo_df.loc[(unique_tenpo_df["hacchu_end_ymd"]==99999999)].reset_index(drop=True)
-                
-                
-#                 #dftest11 = copy.deepcopy(unique_tenpo_df)
-                
-#                 if len(unique_tenpo_df)!=0:
-                    
-#                     if not THEME_MD_MODE:
-#                         # 発売日が現在の13週前より前のデータに絞る
-#                         unique_tenpo_df = unique_tenpo_df.loc[
-#                             unique_tenpo_df['sell_start_ymd'] < (df_cal.loc[df_cal["date"] == df_cal['date'].max()-relativedelta(weeks=13)]["week_from_ymd"].values[0])
-#                         ].reset_index(drop=True)
-
-                        
-#                     #dftest11_1 = copy.deepcopy(unique_tenpo_df)
-                    
-#                     if len(unique_tenpo_df)!=0:
-#                         product_info_df = short_term_preprocess_common.get_product_info_df(
-#                             unique_tenpo_df,
-#                             df_cal,
-#                             dfc_tmp,
-#                             end_nenshudo,
-#                             dpt,
-#                             output_6wk_2sales
-#                         )
-                        
-#                         #product_info_df.to_csv('product_info_df_' + str(tenpo) + '_dpt' + str(dpt) + '.csv', index=False)
-                        
-#                         product_info_df_list.append(product_info_df)
-                        
-
-                        
-#                         path_upload_tmp_local = "gcpアップロード一時データ/temp_time_seriese_" + str(tenpo) + ".csv"
-                        
-#                         ########################################################
-#                         #dftest12 = copy.deepcopy(unique_tenpo_df)
-#                         ########################################################
-                        
-                        
-                        
-#                         if THEME_MD_MODE:
-#                             # テーマMDモードでは、全ての商品データを週次のバケットに出力する（stage2以降で商品を選択する）
-#                             # "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-allprd/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-#                             if len(product_info_df)!=0:
-#                                 time_series_prod_cd, time_series_df = short_term_preprocess_common.upload_timeseries_all_prd_df(
-#                                     product_info_df,
-#                                     unique_tenpo_df,
-#                                     tenpo_df,
-#                                     dpt,
-#                                     tenpo,
-#                                     threshold_missing_ratio,
-#                                     threshold_timeseries_length,
-#                                     path_upload_tmp_local,
-#                                     path_upload_time_series_blob_all_prd,
-#                                     bucket_name
-#                                 )
-                                
-
-                                
-#                         else:
-#                             if len(product_info_df)!=0:
-#                                 # 週次データをアップロード
-#                                 time_series_prod_cd, time_series_df = short_term_preprocess_common.upload_timeseries_df(
-#                                     product_info_df,
-#                                     unique_tenpo_df,
-#                                     tenpo_df,
-#                                     dpt,
-#                                     tenpo,
-#                                     threshold_missing_ratio,
-#                                     threshold_timeseries_length,
-#                                     path_upload_tmp_local,
-#                                     path_upload_time_series_blob,
-#                                     path_upload_time_series_blob2,
-#                                     bucket_name,
-#                                     output_6wk_2sales
-#                                 )
-
-
-                                
-#                                 path_upload_not_ai_local = "gcpアップロード一時データ/not_ai_model" + str(tenpo) + ".csv"
-
-
-
-#                                 week4_summarize_df, not_week4_summarize_df, df_value_count_ret = short_term_preprocess_common.upload_not_timeseries_df(
-#                                     unique_tenpo_df,
-#                                     time_series_prod_cd,
-#                                     df_cal,
-#                                     dpt,
-#                                     tenpo,
-#                                     path_upload_tmp_local,
-#                                     path_upload_not_ai_local,
-#                                     path_upload_monthly_series_blob,
-#                                     path_upload_not_ai_blob,
-#                                     bucket_name
-#                                 )
-
-#                                 df_value_count_ret_list.append(df_value_count_ret)
-
-#                                 # 以下対象商品JANリストのエクセル作成処理
-#                                 '''
-#                                 classify_df_list = short_term_preprocess_common.get_classify_df_list(
-#                                     classify_df_list,
-#                                     unique_tenpo_df,
-#                                     time_series_df,
-#                                     week4_summarize_df,
-#                                     not_week4_summarize_df,
-#                                     start_holdout_nenshudo,
-#                                     df_cal,
-#                                     dfm,
-#                                     df_bunrui,
-#                                     tenpo_list,
-#                                     dpt,
-#                                     tenpo
-#                                 )
-#                                 '''
-                                
-#                         #print('gggggggggggggggg')
-#                         #sys.exit()
-
-                
-                
-#         #print('testend------------')
-#         #sys.exit()
-                
-#         end_time = time.time()
-# #        logger.info("end elapsed time: {}".format(end_time - start_time))
-#         #print("====tenpo_df===",tenpo_df)
-#         logger.info("====tenpo_df===",tenpo_df)
-#         # DPT別処理、ここまで
-
-                            
-
-#     '''
-#     if 1:    
-#         #product_info_df_list_df = pd.concat(product_info_df_list)
-#         #product_info_df_list_df.to_csv('product_info_df_' + str(tenpo) + '.csv')
-
-#         df_value_count_ret_list_all = pd.concat(df_value_count_ret_list)
-#         #df_value_count_ret_list_all.to_csv('df_value_count_ret' + str(tenpo) + '.csv')   
-    
-#         jan_mapping_df_list_df = pd.concat(jan_mapping_df_list)
-#         #jan_mapping_df_list_df.to_csv('jan_mapping_df_list_df_' + str(tenpo) + '.csv', index=False)
-    
-#         subject_jan_master_list_df = pd.concat(subject_jan_master_list)
-#         #subject_jan_master_list_df.to_csv('subject_jan_master_list_df_' + str(tenpo) + '.csv', index=False)
-#     '''
-    
-# '''
-# for i in range(len(tenpo_list)):
-#     temp_df = classify_df_list[i]
-#     temp_df.loc[temp_df['DPTコード'].isin(priority_dpt_list), '優先DPT'] = '〇'
-#     temp_df['商品コード'] = temp_df['商品コード'].astype(str).str.zfill(13)
-#     temp_df.drop_duplicates().to_excel(classify_excel_list[i], f'店舗_{tenpo_df.loc[tenpo_df["TENPO_CD"]==tenpo_list[i]]["TENPO_NM_KJ"].values[0]}_商品リスト',index=False)
-#     classify_excel_list[i].save()
-# blob = bucket.blob(path_bunrui_prd_code_blob.format(tenpo_df[tenpo_df['TENPO_CD']==tenpo]['TENPO_NM_KJ'].values[0]))
-# blob.upload_from_filename(path_bunrui_prd_code.format(tenpo_df[tenpo_df['TENPO_CD']==tenpo]['TENPO_NM_KJ'].values[0]))
-# '''
-# print('stage1 process complete*******************')
-
-            
-            
-#################################
-# Refactored Code: 
-def process_data_for_tenpo(
-    dfc_tmp,
-    tenpo_list,
-    prdcd_grp,
-    selling_period_all,
-    bq_allow_large_results,
-    dpt_list,
-    exclusion_dpt_list,
-    df_bunrui,
-    add_chanceloss_urisu,
-    chance_loss_data,
-    THEME_MD_MODE,
-    bucket,
-    path_tenpo_dpt,
-    bucket_name,
-    short_term_preprocess_common,
-    end_nenshudo,
-    use_jan_connect,
-    jan_master, seisan_tenpo_hattyuu_end_is_not_replaced, my_date, tenpo_df, output_6wk_2sales, threshold_missing_ratio, threshold_timeseries_length, path_upload_time_series_blob_all_prd, path_upload_monthly_series_blob, path_upload_not_ai_blob, dfm_base, prdcd_hattyujan_df, store_prd_hacchu_ymd, dfc, start_nenshudo, path_upload_time_series_blob, path_upload_time_series_blob2
-):
-    """
-    店舗ごとにデータを処理し、販売期間マスタに登録されていないケースパックバラのレコードを追加する。
-    Processes data for each store, adding case pack single item records not registered in the sales period master.
-
-    Args:
-        dfc_tmp (pd.DataFrame): カレンダー情報を含むDataFrame. DataFrame containing calendar information.
-        tenpo_list (list): 店舗コードのリスト. List of store codes.
-        prdcd_grp (dict): 商品コードとグループの辞書. Dictionary of product codes and groups.
-        selling_period_all (pd.DataFrame): 全ての販売期間情報. All sales period information.
-        bq_allow_large_results (bool): BigQueryで大きな結果を許可するかどうか. Whether to allow large results in BigQuery.
-        dpt_list (list): 部門コードのリスト. List of department codes.
-        exclusion_dpt_list (list): 除外する部門コードのリスト. List of department codes to exclude.
-        df_bunrui (pd.DataFrame): 分類情報を含むDataFrame. DataFrame containing classification information.
-        add_chanceloss_urisu (bool): チャンスロスを加えるかどうか. Whether to add chance loss.
-        chance_loss_data (pd.DataFrame): チャンスロスデータ. Chance loss data.
-        THEME_MD_MODE (bool): テーマMDモードかどうか. Whether it is theme MD mode.
-        bucket (google.cloud.storage.bucket.Bucket): GCSバケット. Google Cloud Storage bucket object.
-        path_tenpo_dpt (str): 店舗と部門のパス. Path of store and department.
-        bucket_name (str): バケット名. Bucket name.
-        short_term_preprocess_common (module): short_term_preprocess_common モジュール. short_term_preprocess_common module.
-        end_nenshudo (int): 終了年度. End fiscal year.
-        project_id (str): project_id.
-        dataset_id (str): dataset_id
-        use_jan_connect (bool): Whether to use jan connect.
-        jan_master (pd.DataFrame): jan_master dataFrame.
-
-    Returns:
-        None
-    """
-    dfc_tmp_for_merge = dfc_tmp[(dfc_tmp["nenshudo"] >= 201701)&(dfc_tmp["nenshudo"] < end_nenshudo)] [['nenshudo']].reset_index(drop=True)    
-            
-    for tenpo in tenpo_list: 
-        # 販売期間マスタに登録されていないケースパックバラのレコードを追加する
-        selling_period = selling_period_all[selling_period_all['tenpo_cd']==int(tenpo)].reset_index(drop=True)
-        add_low_list = [selling_period]
-
-        sp_prdc_cd_list = selling_period['prd_cd'].tolist()
-        for prd_cd in selling_period['prd_cd'].tolist():
-            if prd_cd in prdcd_grp:
-                for g_prd_cd in prdcd_grp[prd_cd]:
-                    if (prd_cd != g_prd_cd) and (g_prd_cd not in sp_prdc_cd_list):
-                        temp_record = copy.deepcopy(selling_period[selling_period['prd_cd']==prd_cd])
-                        temp_record['prd_cd'] = g_prd_cd
-                        add_low_list.append(temp_record)
-
-        selling_period = pd.concat(add_low_list)               
-        # ここまで　
-
-        product_info_df_list = []
-        df_value_count_ret_list = []
-        jan_mapping_df_list = []
-        subject_jan_master_list = []
-
-
-        # BQから一括でデータをロードする
-        if bq_allow_large_results:
-            table_id = "T_090_URIAGE_JSK_NB_SHU_TEN_DPT"
-            my_tenpo_cd = str(tenpo_cd).zfill(4)
-            dest_str = f"""dev-cainz-demandforecast.test_data.temp_T_090_URIAGE_JSK_NB_SHU_TEN_DPT_{my_tenpo_cd}"""
-
-            client = bigquery.Client()        
-            client.delete_table(dest_str, not_found_ok=True)
-
-            client = bigquery.Client()
-            bqstorageclient = bigquery_storage_v1.BigQueryReadClient()
-            job_config = bigquery.QueryJobConfig(
-                allow_large_results=True, 
-                destination=dest_str, 
-                use_legacy_sql=False
-            )
-            query = f"""
-            SELECT * FROM `{project_id}.{dataset_id}.{table_id}` WHERE TENPO_CD = '{my_tenpo_cd}'
-            """
-            df_sales = client.query(query, job_config=job_config).result().to_dataframe(bqstorage_client=bqstorageclient)
-            df_sales = df_sales.rename(columns={'NENSHUDO': 'nenshudo', 'BUMON_CD': 'DPT_CD'})
-
-            df_sales['nenshudo'] = df_sales['nenshudo'].astype(int)
-            df_sales['PRD_CD'] = df_sales['PRD_CD'].astype(int)
-            df_sales['DPT_CD'] = df_sales['DPT_CD'].astype(int)
-            df_sales['TENPO_CD'] = df_sales['TENPO_CD'].astype(int)
-
-            df_sales = df_sales.loc[df_sales['nenshudo']<=end_nenshudo]
-
-        for dpt in dpt_list:        
-            logger.info(f'dpt: {dpt} process start *************************')
-            start_time = time.time()
-            dpt = int(dpt)
-            if dpt not in exclusion_dpt_list:            
-                tmp_df_bunrui = df_bunrui.loc[df_bunrui['dpt_cd']==dpt]
-                if len(tmp_df_bunrui) == 0:
-                    continue            
-                dpt_name = df_bunrui.loc[df_bunrui['dpt_cd']==dpt]['dpt_nm'].unique()[0]
-
-                temp_dpt_df = pd.DataFrame()
-
-                # データ探索のためにパスを設定
-                df = pd.DataFrame()
-                dfm = pd.DataFrame()
-
-                # データのロード
-                if bq_allow_large_results:
-                    df = df_sales[df_sales['DPT_CD']==dpt].reset_index(drop=True)
-                    ret_prd_list = df["PRD_CD"].unique().tolist()
-                else:
-                    for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, dpt)):
-                        df, ret_prd_list = short_term_preprocess_common.load_tran_df(
-                            df,
-                            blob,
-                            bucket_name,
-                            tenpo_list,
-                            #train_end_nenshudo,
-                            end_nenshudo,
-                            []
-                        )
-                        # チャンスロス対応
-                        if add_chanceloss_urisu:
-                            if len(df) > 0:
-                                #チャンスロス結合
-                                df = merge_df_cal(df, dfc_tmp_for_merge, tenpo, dpt)
-                                df = pd.merge(df,chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-                                df['CHANCE_LOSS_PRD_SU'] = df['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-                                df['CHANCE_LOSS_KN'] = df['CHANCE_LOSS_KN'].fillna(0.0)
-
-                                df['URI_SU_ORG'] = df['URI_SU']
-                                df['URI_SU'] = df['URI_SU'] + df['CHANCE_LOSS_PRD_SU']
-                                df['URI_KIN'] = df['URI_KIN'] + df['CHANCE_LOSS_KN']
-                                df['BAIKA'][df['BAIKA'].isnull()] = df['CHANCE_LOSS_KN'] / df['CHANCE_LOSS_PRD_SU']
-                                df['URI_SU'] = df['URI_SU'].astype(float)
-                                df = df[df['URI_SU']>0.0].reset_index(drop=True)
-
-                    if THEME_MD_MODE:
-
-                        #print('gggg')
-                        #sys.exit()
-                        # 花王の商品をまず抽出
-                        # 4901301-で始まる
-                        # 4973167-で始まる
-
-                        df['PRD_CD_PREFIX'] = df['PRD_CD'] / 1000000.0
-                        df['PRD_CD_PREFIX'] = df['PRD_CD_PREFIX'].astype(int)
-
-                        df_ex1 = df[(df['PRD_CD_PREFIX']==4901301)|(df['PRD_CD_PREFIX']==4973167)].reset_index(drop=True)
-
-                        if len(df_ex1) > 0:            
-                            #cls_cd_list1 = df_ex1['cls_cd'].unique().tolist()
-
-                            # 同クラスにあるP&G、ライオンの商品も抽出する
-                            # P&G
-                            # 4902430-で始まる
-                            # 4987176-で始まる
-                            # ライオン
-                            # 4903301-で始まる
-                            df_ex2 = df[
-                                #df['cls_cd'].isin(cls_cd_list1)
-                                #&
-                                 (df['PRD_CD_PREFIX']==4902430)
-                                |(df['PRD_CD_PREFIX']==4987176)
-                                |(df['PRD_CD_PREFIX']==4903301)
-                            ]
-                            if len(df_ex2) > 0:
-                                df = pd.concat([df_ex1, df_ex2]).reset_index(drop=True)
-                            else:
-                                df = df_ex1
-
-                if len(df)==0:
-                    #print(' After read tran data df size=0 Warning')
-                    logger.warning('After read tran data df size=0 Warning: Possible data loading issue or empty source.')
-                add_dept_prd_list = []
-
-                if len(df)!=0:
-
-                    if use_jan_connect:
-                        ###
-                        # JANの差し替え指示をさかのぼり対象となるJANを確認
-
-                        # DFのJANコードから差替え指示をさかのぼり、全部関係のあるJANリストと、差し替え指示を取得
-                        # なぜここで'how_change'が6, 10, 11を除外しないのか？ *****************
-                        subject_prod_list, subject_jan_master = short_term_preprocess_common.get_subject_jan_master(
-                            df,
-                            jan_master
-                        )
-                        #print("===df2======",df)
-                        logger.info(f"===df2======{df}")
-
-                        # 差し替え指示が無ければパスする
-                        # 差し替え指示があれば紐づくDPTを抽出
-                        if len(subject_jan_master)!=0:
-                            new_dpt_list, old_dpt_list, subject_dpt_list = short_term_preprocess_common.get_new_old_dpt_list(
-                                subject_jan_master,
-                                subject_prod_list,
-                            )
-                            # 現在ロードしているDPTに関しては必要ないので外す
-                            subject_dpt_list.remove(dpt)
-
-                            # チャンスロス対応
-                            if add_chanceloss_urisu:
-                                # 関係するDPTかつ関係する製品データを追加でロード
-                                #add_dept_prd_list = [] #20230921 上に移動
-                                dft = pd.DataFrame()
-                                for temp_dpt in subject_dpt_list:
-                                    temp_dpt = int(temp_dpt)
-
-                                    if 0:
-                                        dft, ret_prd_list = load_tran_df_bq(
-                                            dft,
-                                            tenpo,
-                                            temp_dpt,
-                                            end_nenshudo,
-                                        ) 
-                                        add_dept_prd_list = add_dept_prd_list + ret_prd_list
-                                    else:
-                                        for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, temp_dpt)):
-                                            dft, ret_prd_list = short_term_preprocess_common.load_tran_df(
-                                                dft,
-                                                blob,
-                                                bucket_name,
-                                                tenpo_list,
-                                                #train_end_nenshudo,
-                                                end_nenshudo,
-                                                subject_prod_list
-                                            )
-                                            add_dept_prd_list = add_dept_prd_list + ret_prd_list                                                       
-                                #チャンスロス結合
-                                if len(dft) > 0:
-                                    dft = merge_df_cal(dft, dfc_tmp_for_merge, tenpo, dpt)
-                                    dft = pd.merge(dft, chance_loss_data[['PRD_CD', 'NENSHUDO', 'CHANCE_LOSS_PRD_SU', 'CHANCE_LOSS_KN']].rename(columns={'NENSHUDO':'nenshudo'}),on=['PRD_CD','nenshudo'], how="left")
-                                    dft['CHANCE_LOSS_PRD_SU'] = dft['CHANCE_LOSS_PRD_SU'].fillna(0.0)
-                                    dft['CHANCE_LOSS_KN'] = dft['CHANCE_LOSS_KN'].fillna(0.0)
-                                    dft['URI_SU_ORG'] = dft['URI_SU']
-                                    dft['URI_SU'] = dft['URI_SU'] + dft['CHANCE_LOSS_PRD_SU']
-                                    dft['URI_KIN'] = dft['URI_KIN'] + dft['CHANCE_LOSS_KN']
-                                    dft['BAIKA'][dft['BAIKA'].isnull()] = dft['CHANCE_LOSS_KN'] / dft['CHANCE_LOSS_PRD_SU']
-                                    dft['URI_SU'] = dft['URI_SU'].astype(float)
-                                    dft = dft[dft['URI_SU']>0.0].reset_index(drop=True)
-                                    df = pd.concat([df, dft], axis=0).reset_index(drop=True)
-
-                            else:
-                                # 関係するDPTかつ関係する製品データを追加でロード
-                                #add_dept_prd_list = [] #20230921 上に移動
-                                for temp_dpt in subject_dpt_list:
-                                    temp_dpt = int(temp_dpt)
-
-                                    if 0:
-                                        df, ret_prd_list = load_tran_df_bq(
-                                            df,
-                                            tenpo,
-                                            temp_dpt,
-                                            end_nenshudo,
-                                        ) 
-                                        add_dept_prd_list = add_dept_prd_list + ret_prd_list
-
-                                    else:
-                                        for blob in bucket.list_blobs(prefix=path_tenpo_dpt.format(tenpo, temp_dpt)):
-                                            df, ret_prd_list = short_term_preprocess_common.load_tran_df(
-                                                df,
-                                                blob,
-                                                bucket_name,
-                                                tenpo_list,
-                                                #train_end_nenshudo,
-                                                end_nenshudo,
-                                                subject_prod_list
-                                            )
-                                            add_dept_prd_list = add_dept_prd_list + ret_prd_list
-
-                    logger.info(f'===df3======{df}')
-                    if THEME_MD_MODE:
-                        dfm = pd.merge(
-                            dfm_base.rename(columns={"prd_cd":"PRD_CD"}),                    
-                            selling_period[selling_period["tenpo_cd"] == tenpo][["tenpo_cd", "prd_cd", "tanagae_hokoku_day", 'hacchu_to_ymd']].rename(columns={"tenpo_cd":"TENPO_CD", "prd_cd":"PRD_CD", "tanagae_hokoku_day":"sell_start_ymd", 'hacchu_to_ymd':'hacchu_end_ymd'}),
-                            on=['PRD_CD'],
-                            how='left' # 販売期間を見ないようにしたいのでleftにする
-                        )                
-                        dfm['sell_start_ymd'] = dfm['sell_start_ymd'].fillna(dfm['sell_start_ymd'].min())
-                        dfm['hacchu_end_ymd'] = dfm['hacchu_end_ymd'].fillna(dfm['hacchu_end_ymd'].max())
-                        dfm['TENPO_CD'] = dfm['TENPO_CD'].fillna(tenpo)                    
-                       
-                        
-                        df = pd.merge(
-                            dfm[["PRD_CD", "TENPO_CD", "sell_start_ymd", "hacchu_end_ymd", "bumon_cd"]], # 20230731 部門コードを追加
-                            df,
-                            on=["PRD_CD", "TENPO_CD"],
-                            how='inner'
-                        )                    
-
-                    else:
-                        dfm = pd.merge(
-                            dfm_base.rename(columns={"prd_cd":"PRD_CD"}),                    
-                            selling_period[selling_period["tenpo_cd"] == tenpo][["tenpo_cd", "prd_cd", "tanagae_hokoku_day", 'hacchu_to_ymd']].rename(columns={"tenpo_cd":"TENPO_CD", "prd_cd":"PRD_CD", "tanagae_hokoku_day":"sell_start_ymd", 'hacchu_to_ymd':'hacchu_end_ymd'}),
-                            on=['PRD_CD'],
-                            how='inner'
-                        )                        
-                        
-                        
-                        df = pd.merge(
-                            dfm[["PRD_CD", "TENPO_CD", "sell_start_ymd", "hacchu_end_ymd", "bumon_cd"]], # 20230731 部門コードを追加
-                            df,
-                            on=["PRD_CD", "TENPO_CD"],
-                            how='inner'
-                        )
-
-                    logger.info(f"===df4======{df}")
-
-                    if 1:                    
-                        # DPTを全て書き換える********************************
-                        df['DPT_CD'] = dpt
-
-                        # **************** 20230516追加
-                        # ケースパックバラJAN書き換え前に、製品/年週度ごとの売価をとっておく
-                        dfgb = df[['TENPO_CD', 'PRD_CD', 'nenshudo', 'BAIKA']].groupby(['TENPO_CD', 'PRD_CD', 'nenshudo']).mean()
-                        dfgb.columns = ['BAIKA_NEW']
-                        # ケースパックバラのJANコードを発注JANに書き替える
-                        df = pd.merge(df, prdcd_hattyujan_df, on='PRD_CD', how='left')
-                        df.loc[~df['HACCHU_JAN'].isnull(), 'PRD_CD'] = df['HACCHU_JAN']                    
-                        #dftest3_1 = copy.deepcopy(df)         
-                        # 発注JANに差し替えたものは、売価も発注JANの売価に差し替える
-                        df = pd.merge(df, dfgb, on=['TENPO_CD', 'PRD_CD', 'nenshudo'], how='left')
-                        df['BAIKA_OLD'] = df['BAIKA']
-                        df.loc[~df['HACCHU_JAN'].isnull(), 'BAIKA'] = df['BAIKA_NEW']         
-                        #dftest3_2 = copy.deepcopy(df)                    
-                        # ソートする
-                        #df = df.sort_values(by=['TENPO_CD', 'PRD_CD', 'nenshudo'])
-                        df = df.sort_values(by=['TENPO_CD', 'PRD_CD', 'nenshudo']).reset_index(drop=True)
-                        df['URI_SU'] = df['URI_SU'].astype(float)
-                        df['HJAN_COEF'] = df['HJAN_COEF'].astype(float)               
-                        # 売価の補完をおこなう
-                        df['BAIKA'] = df[['TENPO_CD', 'PRD_CD', 'BAIKA']].groupby(['TENPO_CD', 'PRD_CD'])['BAIKA'].transform(lambda x: x.interpolate(limit_direction='both'))
-
-                        # 元々発注JANが売られていない商品は、元JANの売価を係数で割って売価とする
-                        df.loc[df['BAIKA'].isnull(), 'BAIKA'] = df['BAIKA_OLD'] / df['HJAN_COEF']
-
-                        # 売り数に発注JANへの変換係数をかける
-                        df.loc[~df['HACCHU_JAN'].isnull(), 'URI_SU'] = df['URI_SU'] * df['HJAN_COEF']
-                        # 売り金額はそのままでよい
-                        df = df.drop(['HACCHU_JAN'], axis=1)
-                        df = df.drop(['HJAN_COEF'], axis=1)
-                        df = df.drop(['BAIKA_NEW'], axis=1)
-                        df = df.drop(['BAIKA_OLD'], axis=1)
-
-                        #dftest3_3 = copy.deepcopy(df)
-
-                        if use_jan_connect:
-
-                            #dftest4 = copy.deepcopy(df)
-
-                            # 'how_change'が6, 10, 11を除外、重複削除
-                            # 販売期間マスタ（hacchu_end_ymd）を結合、keyはnew_JAN
-                            subject_jan_master = short_term_preprocess_common.filtering_jan_master_for_rewriting_jan(
-                                subject_jan_master,
-                                dfm
-                            )
-
-
-
-                            if seisan_tenpo_hattyuu_end_is_not_replaced:
-                                # 生産発注終了日、店舗発注終了日をみて、終了していない差替え元商品の差替え情報を除くため
-                                # 商品マスタを結合
-                                # 商品マスタ（生産発注開始終了日、店舗発注開始終了日）を結合
-                                
-                              
-                                dfm_base['seisan_hacchu_tekiyo_to_ymd'] = dfm_base['seisan_hacchu_tekiyo_to_ymd'].fillna(99999999)
-                                dfm_base['tenpo_hacchu_to_ymd_toitsu'] = dfm_base['tenpo_hacchu_to_ymd_toitsu'].fillna(99999999)
-                                dfm_base['seisan_hacchu_tekiyo_to_ymd'] = dfm_base['seisan_hacchu_tekiyo_to_ymd'].astype(int)
-                                dfm_base['tenpo_hacchu_to_ymd_toitsu'] = dfm_base['tenpo_hacchu_to_ymd_toitsu'].astype(int)  
-
-                                subject_jan_master = pd.merge(subject_jan_master, dfm_base.rename(columns={'prd_cd':'old_JAN'}), on='old_JAN', how='left').reset_index(drop=True)
-                                # 店舗別の生産発注停止情報を結合
-
-                                #金子さんコメント
-                                #個店単位で発注終了日を見るのであれば、
-                                #M030PRD_TEN_TNPN_INFから、PRD_CDとTENPO_CDでターゲットを確定させ、HACCHU_YMD_SEQ_NOを取得して
-                                #M030HACCHU_YMD_INFから、PRD_CDとHACCHU_YMD_SEQ_NOで結合した結果、HACCHU_TO_YMDが本日以前のものをとる
-                                #が、短期の場合のあるべき発注終了の判定かと！
-
-                                #store_prd_hacchu_ymd = common.extract_as_df(path_tenpo_hacchu_master, bucket_name)
-                                #store_prd_hacchu_ymd['TENPO_CD'] = store_prd_hacchu_ymd['TENPO_CD'].astype(int)
-                                #store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].fillna(99999999)
-                                #store_prd_hacchu_ymd['HACCHU_TO_YMD'] = store_prd_hacchu_ymd['HACCHU_TO_YMD'].astype(int)
-                                my_store_prd_hacchu_ymd =store_prd_hacchu_ymd[store_prd_hacchu_ymd['TENPO_CD']==int(tenpo)].reset_index(drop=True)
-                                subject_jan_master = pd.merge(subject_jan_master, my_store_prd_hacchu_ymd.rename(columns={'PRD_CD':'old_JAN'}), on='old_JAN', how='left').reset_index(drop=True)
-
-
-                            # 'hacchu_end_ymd'==99999999の新JANと、それに関連するすべてのJANを取得する
-                            newest_jan_list = short_term_preprocess_common.get_newest_jan_list(
-                                subject_jan_master,
-                                my_date
-                            )                        
-                            # add_dept_prd_listにあるがnewest_jan_listに無いSKUを除外する
-                            del_prd_list = list(set(add_dept_prd_list) - set(newest_jan_list))
-                            df = df[~df['PRD_CD'].isin(del_prd_list)]
-
-
-                         # **********************************************************************************
-                            # DFのPRD_CDで、商品マスタ上、処理対象のDPTでないものを除く 20230731追加
-                            df = df[df['bumon_cd']==dpt]
-                            df = df.drop(['bumon_cd'], axis=1).reset_index(drop=True)
-                            # **********************************************************************************
-
-                            # JAN書き換え*********************************************************
-
-                            # 4549509003038 	4901983805599 	どちらもnewestにしかない
-
-                            df, jan_mapping_df = short_term_preprocess_common.rewrite_jan_code(
-                                subject_jan_master,
-                                newest_jan_list,
-                                df,
-                                'PRD_CD',
-                                my_date,
-                                restrict_old_jan_1generation=restrict_old_jan_1generation_flag,
-                                seisan_tenpo_hattyuu_end_is_not_replaced=seisan_tenpo_hattyuu_end_is_not_replaced
-                            )
-
-                            jan_mapping_df_list.append(jan_mapping_df)
-                            subject_jan_master_list.append(subject_jan_master)
-
-                            #jan_mapping_df.to_csv('jan_mapping_df_' + str(tenpo) + '.csv', index=False)
-
-                            #dftest5 = copy.deepcopy(df)
-                        # groupby処理
-                        # 販売開始日は一番古いもの、販売終了は一番新しものにする
-                        prod_info_df = df[['PRD_CD', 'TENPO_CD', 'DPT_CD', 'sell_start_ymd', 'hacchu_end_ymd']]
-                        prod_info_df = prod_info_df.drop_duplicates()
-                        prod_info_df = prod_info_df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD']).agg({
-                            'sell_start_ymd':'min',
-                            'hacchu_end_ymd':'max'
-                        }).reset_index()
-
-
-                        df = df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD', 'nenshudo']).agg({'URI_SU':'sum','URI_KIN':'sum', 'BAIKA':'mean'}).reset_index()
-                        #df = df.groupby(['PRD_CD', 'TENPO_CD', 'DPT_CD', 'nenshudo']).agg({'URI_SU':'sum','URI_KIN':'sum'}).reset_index()                    
-
-                        #dftest5_3 = copy.deepcopy(df)                    
-                        df = pd.merge(df, prod_info_df, on=['PRD_CD', 'TENPO_CD', 'DPT_CD'], how='inner')
-                        ###################################################
-                        #dftest6 = copy.deepcopy(df)
-                        ###################################################
-                        #print('test2 exit')
-                        #sys.exit()
-
-                # 商品情報の結合
-                    #print("===df5======",df)
-                    logger.info(f"===df5======{df}")
-                 
-                    df = pd.merge(
-                        dfm[[
-                            "PRD_CD","prd_nm_kj", "hnmk_cd", "cls_cd", "line_cd", "shoki_genka", 
-                        "shoki_baika", "genka_toitsu", "baika_toitsu", "low_price_kbn"
-                        ]],
-                        df,
-                        on="PRD_CD",
-                        how="inner"
-                    )
-
-                    #dftest7 = copy.deepcopy(df)
-                
-            
-                    df = pd.merge(df, df_bunrui[['cls_cd', 'cls_nm']], on='cls_cd', how='inner')
-                    logger.info(f"===df6======{df}")
-                    #col_list = ["nenshudo","shudo","week_from_ymd"]
-                    #df_cal = get_df_cal_out_calender(dfc,start_nenshudo,end_nenshudo, col_list)
-                    
-                    
-                    df_cal = pd.DataFrame(dfc["nenshudo"].drop_duplicates().sort_values().reset_index(drop=True))
-                    df_cal = dfc[
-                        (dfc["nenshudo"]>=start_nenshudo) & \
-                        (dfc["nenshudo"]<=end_nenshudo)
-                    ][["nenshudo","shudo","week_from_ymd"]].reset_index(drop=True)
-                    df_cal["date"] = df_cal["week_from_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-                    df_cal = pd.merge(df_cal, dfc[['nenshudo', 'nendo', 'znen_nendo', 'znen_shudo','minashi_tsuki']], on='nenshudo')
-                    df_cal = df_cal.loc[
-                        (df_cal['nenshudo']>=start_nenshudo)&\
-                        (df_cal['nenshudo']<=end_nenshudo)
-                    ].reset_index(drop=True)          
-                    
-                    
-                    ###                
-                    #dftest9 = copy.deepcopy(df)
-                    if not THEME_MD_MODE:
-                        # 発注終了が無い商品は除外
-                        df = df.loc[(~df["hacchu_end_ymd"].isnull())].reset_index(drop=True)
-
-                    logger.info(f"===========df7==========={df}")
-
-                    # JAN結合後データを店舗で絞る
-                    unique_tenpo_df = df.loc[df['TENPO_CD']==tenpo].reset_index(drop=True)
-                    # **********************************************************************************
-                    # DFのPRD_CDで、商品マスタ上、処理対象のDPTでないものを除く 20230826追加
-                    my_bumon_cd_prdcd_list = list(set(dfm_base[dfm_base['bumon_cd']==dpt]['prd_cd']))
-                    unique_tenpo_df = unique_tenpo_df[unique_tenpo_df['PRD_CD'].isin(my_bumon_cd_prdcd_list)].reset_index(drop=True)
-                    # **********************************************************************************
-
-                    if not THEME_MD_MODE:
-                        # 発注終了していないものに絞る
-                        unique_tenpo_df = unique_tenpo_df.loc[(unique_tenpo_df["hacchu_end_ymd"]==99999999)].reset_index(drop=True)
-
-                    #dftest11 = copy.deepcopy(unique_tenpo_df)
-
-                    if len(unique_tenpo_df)!=0:
-
-                        if not THEME_MD_MODE:
-                            # 発売日が現在の13週前より前のデータに絞る
-                            unique_tenpo_df = unique_tenpo_df.loc[
-                                unique_tenpo_df['sell_start_ymd'] < (df_cal.loc[df_cal["date"] == df_cal['date'].max()-relativedelta(weeks=13)]["week_from_ymd"].values[0])
-                            ].reset_index(drop=True)
-
-
-                        #dftest11_1 = copy.deepcopy(unique_tenpo_df)
-
-                        if len(unique_tenpo_df)!=0:
-                            product_info_df = short_term_preprocess_common.get_product_info_df(
-                                unique_tenpo_df,
-                                df_cal,
-                                dfc_tmp,
-                                end_nenshudo,
-                                dpt,
-                                output_6wk_2sales
-                            )
-
-                            #product_info_df.to_csv('product_info_df_' + str(tenpo) + '_dpt' + str(dpt) + '.csv', index=False)                        
-                            product_info_df_list.append(product_info_df)
-                            path_upload_tmp_local = "gcpアップロード一時データ/temp_time_seriese_" + str(tenpo) + ".csv"     
-                            ########################################################
-                            #dftest12 = copy.deepcopy(unique_tenpo_df)
-                            ########################################################
-                              
-                            if THEME_MD_MODE:
-                                
-                                # テーマMDモードでは、全ての商品データを週次のバケットに出力する（stage2以降で商品を選択する）
-                                # "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-allprd/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-                                if len(product_info_df)!=0:
-                                    time_series_prod_cd, time_series_df = short_term_preprocess_common.upload_timeseries_all_prd_df(
-                                        product_info_df,
-                                        unique_tenpo_df,
-                                        tenpo_df,
-                                        dpt,
-                                        tenpo,
-                                        threshold_missing_ratio,
-                                        threshold_timeseries_length,
-                                        path_upload_tmp_local,
-                                        path_upload_time_series_blob_all_prd,
-                                        bucket_name
-                                    )
-
-                            else:
-                                
-                                if len(product_info_df)!=0:
-                                    # 週次データをアップロード
-                                    time_series_prod_cd, time_series_df=short_term_preprocess_common.upload_timeseries_df(
-                                        product_info_df,
-                                        unique_tenpo_df,
-                                        tenpo_df,
-                                        dpt,
-                                        tenpo,
-                                        threshold_missing_ratio,
-                                        threshold_timeseries_length,
-                                        path_upload_tmp_local,
-                                        path_upload_time_series_blob,
-                                        path_upload_time_series_blob2,
-                                        bucket_name,
-                                        output_6wk_2sales
-                                    )
-                                    
-                                    path_upload_not_ai_local = "gcpアップロード一時データ/not_ai_model" + str(tenpo) +".csv"
-                                    
-                                
-                                    week4_summarize_df, not_week4_summarize_df, df_value_count_ret = short_term_preprocess_common.upload_not_timeseries_df(
-                                        unique_tenpo_df,
-                                        time_series_prod_cd,
-                                        df_cal,
-                                        dpt,
-                                        tenpo,
-                                        path_upload_tmp_local,
-                                        path_upload_not_ai_local,
-                                        path_upload_monthly_series_blob,
-                                        path_upload_not_ai_blob,
-                                        bucket_name
-                                    )
-                                    
-                                    df_value_count_ret_list.append(df_value_count_ret)
-                                    
-
-            end_time = time.time()
-            logger.info(f"====tenpo_df==={tenpo_df}")
-            # DPT別処理、ここまで
-            
-    logger.info('stage1 process complete*******************')
-    return tenpo
-
-
-           
-            
-#################################
-# Old Code:              
-# # 週次モデル ***************************************************************************************************
-# # cloud functions name  :shortterm-stage2-weekly
-# # https://console.cloud.google.com/functions/details/asia-northeast1/shortterm-stage2-weekly?env=gen2&authuser=0&project=dev-cainz-demandforecast
-# #
-# # functions url:
-# # https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-weekly
-# def trigger_cloud_function_stage2_weekly():
-#     url = 'https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-weekly'
-#     try:
-#         response = requests.post(url)  # POST リクエストを送信
-#         # GETリクエストの場合は、データをクエリパラメーターとしてURLに追加
-#         if response.status_code != 200:
-#             raise Exception(f'HTTP error! status: {response.status_code}')
-
-#         response_data = response.json()
-#         #print('Function response:', response_data)
-#         logger.info('Function response:', response_data)
-#     except Exception as error:
-#         #print('Error calling Cloud Function:', error)
-#         logger.info('Error calling Cloud Function:', error)
- 
-            
-
-# # 少量品モデル ***************************************************************************************************
-# # cloud functions name  :shortterm-stage2-monthly
-# # https://console.cloud.google.com/functions/details/asia-northeast1/shortterm-stage2-monthly?env=gen2&authuser=0&project=dev-cainz-demandforecast
-# #
-# # functions url:
-# # https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-monthly
-
-# def trigger_cloud_function_stage2_monthly():
-    
-#     url = 'https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-monthly'
-
-#     try:
-#         response = requests.post(url)  # POST リクエストを送信
-#         # GETリクエストの場合は、データをクエリパラメーターとしてURLに追加
-
-#         if response.status_code != 200:
-#             raise Exception(f'HTTP error! status: {response.status_code}')
-
-#         response_data = response.json()
-#         #print('Function response:', response_data)
-#         logger.info('Function response:', response_data)
-#     except Exception as error:
-#         #print('Error calling Cloud Function:', error)
-#         logger.info('Error calling Cloud Function:', error)
-
-
-# def trigger_cloud_function_stage2_midium():
-#     # ********************************************************
-#     # 起動方法が週次、少量品と異なっているので注意！！！！！！！
-#     # ********************************************************
-                  
-#     # Cloud FunctionのエンドポイントURL
-#     url = 'https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-midium'
-#     try:
-#         # Google Cloudの認証トークンを取得
-#         auth_req = google.auth.transport.requests.Request()
-#         id_token = google.oauth2.id_token.fetch_id_token(auth_req, url)
-#         headers = {
-#             'Authorization': f'Bearer {id_token}',
-#             'Content-Type': 'application/json'  # JSONデータを送信するためのContent-Type
-#         }
-#         #response = requests.post(url, json=data, headers=headers)
-#         response = requests.post(url, headers=headers)
-#         if response.status_code != 200:
-#             raise Exception(f'HTTP error! status: {response.status_code}')
-#         response_data = response.json()
-#         #print('Function response:', response_data)
-#         logger.info('Function response:', response_data)
-#     except Exception as error:
-#         #print('Error calling Cloud Function:', error)
-#         logger.info('Error calling Cloud Function:', error)
-        
-
-# if cloudrunjob_mode and EXECUTE_STAGE2:
-        
-#     # stage1完了チェックフォルダ配下への完了ファイルアップロード
-#     path_upload_blob = prefix + str(tenpo) + ".csv"
-
-#     tmp_fname = str(tenpo) + ".csv"
-#     my_df = pd.DataFrame([[tenpo]])
-#     my_df.to_csv(tmp_fname, index=False)
-
-#     blob = bucket.blob(path_upload_blob)
-#     blob.upload_from_filename(tmp_fname)
-
-
-#     # 全店分のstage1が終了しているかチェックする
-#     complete_task_count = sum([1 for blob in blobs])
-
-#     if TASK_COUNT == complete_task_count:
-#         trigger_cloud_function_stage2_weekly()
-#         trigger_cloud_function_stage2_monthly()
-#         trigger_cloud_function_stage2_midium()
-
-#         print('execute stage2 cloudrunjobs complete*******************')
-
-#         # stage1完了チェックフォルダ配下のファイル削除
-#         for blob in blobs:
-#             #print(blob.name)
-#             logger.info(blob.name)
-#             generation_match_precondition = None
-#             blob.reload()  # Fetch blob metadata to use in generation_match_precondition.
-#             generation_match_precondition = blob.generation
-#             blob.delete(if_generation_match=generation_match_precondition)
-#             #print(f"Blob {blob.name} deleted.")
-#             logger.info(f"Blob {blob.name} deleted.")
-            
-            
-            
-
-#################################
-# Refactored Code: 
-def trigger_cloud_function(url):
-    """
-    Triggers a Cloud Function.
-
-    Args:
-        url (str): The URL of the Cloud Function.
-
-    Returns:
-        dict: The JSON response from the Cloud Function.
-
-    Raises:
-        Exception: If there's an error calling the Cloud Function.
-    """
-    try:
-        response = requests.post(url)
-
-        if response.status_code != 200:
-            raise Exception(f'HTTP error! status: {response.status_code}')
-        response_data = response.json()
-        logger.info(f'Function response from {url}: {response_data}')
-        return response_data
-    except Exception as error:
-        logger.error(f'Error calling Cloud Function {url}: {error}')
-        raise #Re-raise the exception for handling upstream if necessary
-
-
-            
-def trigger_cloud_function_stage2_midium(url):
-    """Triggers the shortterm-stage2-midium Cloud Function (requires authentication)."""
-    # ********************************************************
-    # 起動方法が週次、少量品と異なっているので注意！！！！！！！
-    # ********************************************************
-    try:
-        # Google Cloudの認証トークンを取得
-        auth_req = google.auth.transport.requests.Request()
-        id_token = google.oauth2.id_token.fetch_id_token(auth_req, url)
-        headers = {
-            'Authorization': f'Bearer {id_token}',
-            'Content-Type': 'application/json'  # JSONデータを送信するためのContent-Type
-        }
-        #response = requests.post(url, json=data, headers=headers)
-        response = requests.post(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f'HTTP error! status: {response.status_code}')
-        response_data = response.json()
-        #print('Function response:', response_data)
-        logger.info(f'Function response: {response_data}')
-    except Exception as error:
-        #print('Error calling Cloud Function:', error)
-        logger.info(f'Error calling Cloud Function: {error}')
-            
-
-
-def check_and_trigger(tenpo):
-    """
-    Uploads a completion file, checks if all tasks are complete, and triggers Stage 2 Cloud Functions.
-
-    Args:
-        tenpo (str): The tenpo identifier.
-    """
-    if cloudrunjob_mode and EXECUTE_STAGE2:
-        
-        # stage1完了チェックフォルダ配下への完了ファイルアップロード
-        path_upload_blob = prefix + str(tenpo) + ".csv"
-
-        tmp_fname = str(tenpo) + ".csv"
-        my_df = pd.DataFrame([[tenpo]])
-        my_df.to_csv(tmp_fname, index=False)
-        blob = bucket.blob(path_upload_blob)
-        blob.upload_from_filename(tmp_fname)
-
-
-        # 全店分のstage1が終了しているかチェックする        
-            
-        blobs = storage_client.list_blobs(bucket, prefix='vertex_pipelines/pipeline/pipeline_shortterm1/check_stage1_complete/completed_')   
-        complete_task_count = sum([1 for blob in blobs])
-        # STAGE2_WEEKLY_URL ='https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-weekly'
-        # STAGE2_MONTHLY_URL = 'https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-monthly'
-        # STAGE2_MIDIUM_URL ='https://asia-northeast1-dev-cainz-demandforecast.cloudfunctions.net/shortterm-stage2-midium'
-
-        if TASK_COUNT == complete_task_count:
-            trigger_cloud_function(STAGE2_WEEKLY_URL)
-            trigger_cloud_function(STAGE2_MONTHLY_URL)
-            trigger_cloud_function_stage2_midium(STAGE2_MIDIUM_URL)
-
-            print('execute stage2 cloudrunjobs complete*******************')
-            #print("blobs", blobs)
-            # stage1完了チェックフォルダ配下のファイル削除
-            for blob in blobs:
-                logger.info(blob.name)
-                try:
-                    #generation_match_precondition = None
-                    blob.reload()  # Fetch blob metadata to use in generation_match_precondition.
-                    generation_match_precondition = blob.generation
-                    blob.delete(if_generation_match=generation_match_precondition)
-                    #print(f"Blob {blob.name} deleted.")
-                    logger.info(f"Blob {blob.name} deleted.")
-                except NotFound:
-                    logger.warning(f"Blob {blob.name} not found. skipping deletion. ")
-
-  
-            
-def main():
-    """Main function to orchestrate the process."""
-    EXECUTE_STAGE2 = int(os.environ.get("EXECUTE_STAGE2", 0))
-    THEME_MD_MODE = int(os.environ.get("THEME_MD_MODE", 0))
-
-    if cloudrunjob_mode:
-        tenpo_cd = tenpo_cd_list[TASK_INDEX]
-        if (TASK_INDEX == 0) and (EXECUTE_STAGE2 == 1):
-            clear_stage1_complete_files(storage_client, bucket)  # Call function
-    else:
-        # notebookで動かすモード
-        tenpo_cd = int(sys.argv[1])
-        TODAY_OFFSET = 0
-        TASK_COUNT = 0
-        EXECUTE_STAGE2 = 0
-        OUTPUT_HACCHUJAN_INFO = 0
-        OUTPUT_HACCHUJAN_TABLE_TEST = 0
-        OUTPUT_HACCHUJAN_INFO_GCS = 1
-        THEME_MD_MODE = 0
-        
-    tenpo_list = [int(tenpo_cd)]  
-    logger.info(f"==tenpo_cd== {tenpo_cd}") 
-    logger.info(f"==tenpo_list== {tenpo_list}")
-    
-    
-    path_upload_time_series_blob = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-    path_upload_time_series_blob2 = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-62/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-    path_upload_time_series_blob_all_prd = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-allprd/'+str(tenpo_cd)+"/{}_{}_time_series.csv"
-    path_upload_monthly_series_blob = "01_short_term/01_stage1_result/02_monthly/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_monthly_series.csv"
-    path_upload_not_ai_blob = "01_short_term/01_stage1_result/03_not_ai_target/"+str(today)+'-6/'+str(tenpo_cd)+"/{}_{}_not_ai_model.csv"
-    
-    # Load configuration based on season_flag
-    season_flag = False  #  Consider making this configurable
-    
-    config_file = CONFIG_SEASON_FILE if season_flag else CONFIG_NOT_SEASON_FILE
-    try:
-        with open(config_file, 'r') as file:  # Specify 'r' for read mode
-            config = yaml.safe_load(file)
-        logger.info(f"Loaded configuration from {config_file}")
-    except FileNotFoundError:
-        logger.error(f"Configuration file not found: {config_file}")
-        config = {}  # Provide a default empty dictionary to avoid errors
-    
-    # Set default values
-    start_holdout_nenshudo = config.get('start_holdout_nenshudo', DEFAULT_START_HOLDOUT_NENSHUDO)
-    start_nenshudo = config.get('start_nenshudo', DEFAULT_START_NENSHUDO)
-    
-    # Determine end_date and end_date_str
-    end_date = int(today.strftime('%Y%m%d'))
-    end_date_str = today.strftime('%Y-%m-%d')
-    logger.info(f"==end_date=== {end_date}")
-    logger.info("loading 週番マスター")
-    
-    path_week_master = config['path_week_master']
-
-    dfc = common.extract_as_df(path_week_master, bucket_name)
-
-    dfc_tmp = dfc[["nenshudo","week_from_ymd","week_to_ymd"]]
-    
-    # end_nenshudo = config['end_nenshudo']
-    
-    dfc_tmp["week_from_ymd"] = dfc_tmp["week_from_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-    dfc_tmp["week_to_ymd"] = dfc_tmp["week_to_ymd"].apply(lambda x : pd.to_datetime(str(x)))
-    
-    df_end_nenshudo  = dfc_tmp["nenshudo"][(dfc_tmp["week_from_ymd"] <= end_date_str)&(dfc_tmp["week_to_ymd"] >= end_date_str)]
-
-    end_nenshudo = int(df_end_nenshudo.values[0])
-
-    # train_end_nenshudo = int(df_end_nenshudo.values[0])
-
-    #print("==end_nenshudo==",end_nenshudo)
-    logger.info(f"==end_nenshudo== ({end_nenshudo})")
-
-    # 時系列判別の時の欠損と時系列長の閾値
-    threshold_missing_ratio = 0.2
-    threshold_timeseries_length = 180
-
-    if not os.path.exists(path_upload_tmp_local_dir):
-        os.mkdir(path_upload_tmp_local_dir)
-
-    dfc = common.extract_as_df(path_week_master, bucket_name)
-    df_bunrui = common.extract_as_df(path_bunrui, bucket_name)
-    tenpo_df = common.extract_as_df(path_tenpo_master, bucket_name)
-    tenpo_df = tenpo_df.rename(columns={"LPAD(TENPO_CD,4,0)":"TENPO_CD"})
-
-    selling_period_all = common.extract_as_df(path_selling_period, bucket_name)
-    prd_asc = common.extract_as_df(path_prd_asc, bucket_name)
-                
-    dfm_base = load_product_master_data(
-                  tenpo_cd,
-                   bucket_name, TABLE_ID = 'M_090_PRD_NB_STD'
-                )
-    
-    chance_loss_data, jan_master, store_prd_hacchu_ymd, dfm_base = process_data(
-                        dfm_base,  end_date, tenpo_list, tenpo_df, tenpo_cd, 
-                        table_id = 'T_090_PRD_CHANCE_LOSS_NB_DPT', 
-                    )
-    prd_asc_tmp = prd_asc[prd_asc['asc_riyu_cd']==3]
-    prd_asc_tmp = prd_asc_tmp[['prd_cd', 'asc_prd_cd']].rename(columns={"prd_cd":"PRD_CD", 'asc_prd_cd':"ASC_PRD_CD"})
-    groups = create_case_pack_bara_groups(prd_asc, prd_asc_tmp)
-    prdcd_grp = create_prdcd_to_group_dict(groups)
-    prdcd_hattyujan_df = create_prdcd_hattyujan_df(prd_asc, groups)
-    prdcd_hattyujan_df.to_csv('prdcd_hattyujan_df.csv', index=False)            
-    prdcd_hcjan_coef, prdcd_hcjan_coef_log = calculate_prdcd_hcjan_coefficients(prd_asc, prdcd_hattyujan_df)  
-    prdcd_hattyujan_df = output_hacchujan_info(prdcd_hcjan_coef, prdcd_hcjan_coef_log, prdcd_hattyujan_df,                                                                                     end_nenshudo, tenpo_cd)
-    tenpo =process_data_for_tenpo(dfc_tmp,tenpo_list,prdcd_grp,selling_period_all,                 bq_allow_large_results,dpt_list,exclusion_dpt_list,df_bunrui,add_chanceloss_urisu,chance_loss_data,THEME_MD_MODE,bucket,path_tenpo_dpt,bucket_name,short_term_preprocess_common,end_nenshudo,use_jan_connect,jan_master, seisan_tenpo_hattyuu_end_is_not_replaced, my_date, tenpo_df, output_6wk_2sales, threshold_missing_ratio, threshold_timeseries_length, path_upload_time_series_blob_all_prd, path_upload_monthly_series_blob, path_upload_not_ai_blob, dfm_base, prdcd_hattyujan_df, store_prd_hacchu_ymd, dfc, start_nenshudo, path_upload_time_series_blob, path_upload_time_series_blob2)    
-                
-    check_and_trigger(tenpo)
-
-
-            
-            
-if __name__ == "__main__":
-    main()
-            
-            
-
-            
-            
-
-
-
-
-
-
-
+dfc = common.extract_as_df(path_week_master, bucket_name)       nenshudo  nendo  shudo  minashi_tsuki  week_from_ymd  week_to_ymd  \
+0       200301   2003      1              3       20030224     20030302   
+1       200302   2003      2              3       20030303     20030309   
+2       200303   2003      3              3       20030310     20030316   
+3       200304   2003      4              3       20030317     20030323   
+4       200305   2003      5              3       20030324     20030330   
+...        ...    ...    ...            ...            ...          ...   
+1456    203048   2030     48              1       20310120     20310126   
+1457    203049   2030     49              2       20310127     20310202   
+1458    203050   2030     50              2       20310203     20310209   
+1459    203051   2030     51              2       20310210     20310216   
+1460    203052   2030     52              2       20310217     20310223   
+
+      znen_nendo  znen_shudo  znen_week_from_ymd  znen_week_to_ymd  \
+0           2002           1            20020225          20020303   
+1           2002           2            20020304          20020310   
+2           2002           3            20020311          20020317   
+3           2002           4            20020318          20020324   
+4           2002           5            20020325          20020331   
+...          ...         ...                 ...               ...   
+1456        2029          48            20300121          20300127   
+1457        2029          49            20300128          20300203   
+1458        2029          50            20300204          20300210   
+1459        2029          51            20300211          20300217   
+1460        2029          52            20300218          20300224   
+
+      znen_minashi_tsuki  
+0                      3  
+1                      3  
+2                      3  
+3                      3  
+4                      3  
+...                  ...  
+1456                   1  
+1457                   2  
+1458                   2  
+1459                   2  
+1460                   2  
+
+
+
+
+
+
+dfc = common.extract_as_df(path_week_master, bucket_name)       nenshudo  nendo  shudo  minashi_tsuki  week_from_ymd  week_to_ymd  \
+0       200301   2003      1              3       20030224     20030302   
+1       200302   2003      2              3       20030303     20030309   
+2       200303   2003      3              3       20030310     20030316   
+3       200304   2003      4              3       20030317     20030323   
+4       200305   2003      5              3       20030324     20030330   
+...        ...    ...    ...            ...            ...          ...   
+1456    203048   2030     48              1       20310120     20310126   
+1457    203049   2030     49              2       20310127     20310202   
+1458    203050   2030     50              2       20310203     20310209   
+1459    203051   2030     51              2       20310210     20310216   
+1460    203052   2030     52              2       20310217     20310223   
+
+      znen_nendo  znen_shudo  znen_week_from_ymd  znen_week_to_ymd  \
+0           2002           1            20020225          20020303   
+1           2002           2            20020304          20020310   
+2           2002           3            20020311          20020317   
+3           2002           4            20020318          20020324   
+4           2002           5            20020325          20020331   
+...          ...         ...                 ...               ...   
+1456        2029          48            20300121          20300127   
+1457        2029          49            20300128          20300203   
+1458        2029          50            20300204          20300210   
+1459        2029          51            20300211          20300217   
+1460        2029          52            20300218          20300224   
+
+      znen_minashi_tsuki  
+0                      3  
+1                      3  
+2                      3  
+3                      3  
+4                      3  
+...                  ...  
+1456                   1  
+1457                   2  
+1458                   2  
+1459                   2  
+1460                   2  
+
+
+
+
+
+
+df_bunrui = common.extract_as_df(path_bunrui, bucket_name)       sbu_cd       sbu_nm  jigyobu_cd    jigyobu_nm  dpt_cd    dpt_nm  \
+0          1  ライフスタイル事業本部           1  インテリア・ファニシング      60        収納   
+1          1  ライフスタイル事業本部           1  インテリア・ファニシング      60        収納   
+2          1  ライフスタイル事業本部           1  インテリア・ファニシング      60        収納   
+3          1  ライフスタイル事業本部           1  インテリア・ファニシング      60        収納   
+4          1  ライフスタイル事業本部           1  インテリア・ファニシング      60        収納   
+...      ...          ...         ...           ...     ...       ...   
+2294       9           本部          98        その他事業部      80       用度品   
+2295       9           本部          98        その他事業部      80       用度品   
+2296       9           本部          98        その他事業部      80       用度品   
+2297       9           本部          98        その他事業部      98  カインズ　コート   
+2298       9           本部          98        その他事業部      99      売上除外   
+
+      line_cd   line_nm  cls_cd       cls_nm  
+0         602    キッチン収納    6020          ワゴン  
+1         602    キッチン収納    6021        スキマ収納  
+2         603      衣類収納    6030        押入れ収納  
+3         603      衣類収納    6031     クローゼット収納  
+4         603      衣類収納    6032     リビングチェスト  
+...       ...       ...     ...          ...  
+2294        3       その他    8031         カタログ  
+2295        3       その他    8032  ＨＯＷ　ＴＯ　シリーズ  
+2296        4       人件費    8040        厚生福利費  
+2297      980  カインズ　コート    9800     カインズ　コート  
+2298      990      売上除外    9988       販売用レジ袋  
+
+
+
+
+
+
+tenpo_df = common.extract_as_df(path_tenpo_master, bucket_name)      LPAD(TENPO_CD,4,0)  BR_NO  MAINT_FROM_YMD  MAINT_TO_YMD TENPO_NM_KJ  \
+0                     1      0        20181005      99999999     カインズ　本部   
+1                     8      0        20250919      99999999    MDカインズWS   
+2                    11      0        20250905      99999999   カインズリフォーム   
+3                    12      0        20250816      99999999   UNIカインズWS   
+4                    13      0        20250822      99999999   IZMカインズWS   
+..                  ...    ...             ...           ...         ...   
+364                 993      0        20241016      99999999      修理センター   
+365                 994      0        20240604      99999999  Amazon FBA   
+366                 996      0        20181005      99999999      ベイシア取引   
+367                 997      0        20240403      99999999     CzPRO外商   
+368                 998      0        20240510      99999999    札幌ホールセール   
+
+      TENPO_NM_K TENPO_RYAKUSHO_KJ TENPO_RYAKUSHO_K  TODOFUKEN_CD  YUBIN_NO  \
+0     ｶｲﾝｽﾞ ﾎﾝﾌﾞ                本部             ﾎﾝﾌﾞ            11  367-0030   
+1      MDｶｲﾝｽﾞWS          MDカインズWS         MDｶｲﾝｽﾞW            28  000-0000   
+2     ｶｲﾝｽﾞﾘﾌｫｰﾑ          カインズリフォー         ｶｲﾝｽﾞﾘﾌｫ            11  000-0000   
+3     UNIｶｲﾝｽﾞWS          UNIカインズW         UNIｶｲﾝｽﾞ             9  000-0000   
+4     IZMｶｲﾝｽﾞWS          IZMカインズW         IZMｶｲﾝｽW            40  000-0000   
+..           ...               ...              ...           ...       ...   
+364     ｼｭｳﾘｾﾝﾀｰ            修理センター         ｼｭｳﾘｾﾝﾀｰ            11  355-0215   
+365   Amazon FBA          Amazon F         Amazon F             9  329-1579   
+366    ﾍﾞｲｼｱﾄﾘﾋｷ            ベイシア取引         ﾍﾞｲｼｱﾄﾘﾋ            11  367-0030   
+367  Czproｶﾞｲｼｮｳ           CzPRO外商         Czproｶﾞｲ            10  000-0000   
+368  ｻｯﾎﾟﾛﾎｰﾙｾｰﾙ          札幌ホールセール         ｻｯﾎﾟﾛﾎｰﾙ             1  003-0030   
+
+                               JUSHO_KJ  \
+0                    埼玉県本庄市早稲田の杜一丁目２番１号   
+1    兵庫県神戸市須磨区弥栄台４－１－１（福山通運　神戸流通センター１Ｆ）   
+2                                   埼玉県   
+3                         栃木県矢板市こぶし台５－１   
+4                    福岡県福岡市東区大字蒲田８３７１－１   
+..                                  ...   
+364                    埼玉県比企郡嵐山町菅谷５２５－１   
+365                         栃木県矢板市こぶし台５   
+366                  埼玉県本庄市早稲田の杜一丁目２番１号   
+367                              群馬県高崎市   
+368       北海道札幌市白石区流通センター４丁目５－１日本通運（株）内   
+
+                                             JUSHO_K TEL_NO_DAIHYO  \
+0                          ｻｲﾀﾏｹﾝﾎﾝｼﾞｮｳｼﾜｾﾀﾞﾉﾓﾘ1-2-1  0495-25-1000   
+1                                            ﾋｮｳｺﾞｹﾝ  000-000-0000   
+2                                             ｻｲﾀﾏｹﾝ  0000-00-0000   
+3                                             ﾄﾁｷﾞｹﾝ  0000-00-0000   
+4                                            ﾋｮｳｺﾞｹﾝ  0000-00-0000   
+..                                               ...           ...   
+364                      ｻｲﾀﾏｹﾝﾋｷｸﾞﾝﾗﾝｻﾞﾝﾏﾁｽｶﾞﾔ525-1  0493-00-0000   
+365                               ﾄﾁｷﾞｹﾝﾔｲﾀｼｺﾌﾞｼﾀﾞｲ5  0287-48-7321   
+366                        ｻｲﾀﾏｹﾝﾎﾝｼﾞｮｳｼﾜｾﾀﾞﾉﾓﾘ1-2-1  0495-25-1000   
+367                                      ｸﾞﾝﾏｹﾝﾀｶｻｷｼ  0000-00-0000   
+368  ﾎｯｶｲﾄﾞｳｻｯﾎﾟﾛｼｼﾛｲｼｸﾘｭｳﾂｳｾﾝﾀｰ4ﾁｮｳﾒ5-1ﾆﾎﾝﾂｳｳﾝｶﾌﾞﾅｲ  0000-00-0000   
+
+    TEL_NO_YAKAN  TEL_NO_TENPO_CHOKUTSU        FAX_NO FAX_NO_YOBI  \
+0            NaN                    NaN  0495-25-1001         NaN   
+1            NaN                    NaN           NaN         NaN   
+2            NaN                    NaN           NaN         NaN   
+3            NaN                    NaN           NaN         NaN   
+4            NaN                    NaN           NaN         NaN   
+..           ...                    ...           ...         ...   
+364          NaN                    NaN           NaN         NaN   
+365          NaN                    NaN           NaN         NaN   
+366          NaN                    NaN  0495-25-1001         NaN   
+367          NaN                    NaN           NaN         NaN   
+368          NaN                    NaN           NaN         NaN   
+
+     CHOKUEI_FC_KBN  SHOP_KEITAI_KBN  ICHIJI_HEITEN_KBN  SHIZAIKAN_UMU  \
+0                 5                0                  0              0   
+1                 0                0                  0              0   
+2                 0                7                  0              0   
+3                 0                0                  0              0   
+4                 0                0                  0              0   
+..              ...              ...                ...            ...   
+364               0                0                  0              0   
+365               0                0                  0              0   
+366               0                0                  0              0   
+367               0                0                  0              0   
+368               0                0                  0              0   
+
+     GREEN_UMU  TORIATSUKAI_DC_KBN  POS_KADO_KBN  AREA_KBN  YOREI_CENTER_KBN  \
+0            0                   1           NaN        90                 0   
+1            0                   3           NaN        90                 0   
+2            0                   1           NaN        90                 0   
+3            0                   2           NaN        90                 0   
+4            0                  11           NaN        90                 0   
+..         ...                 ...           ...       ...               ...   
+364          0                   1           NaN        90                 0   
+365          0                   2           NaN        90                 0   
+366          0                   1           NaN        90                 0   
+367          0                   1           NaN        90                 0   
+368          0                  10           NaN        90                 0   
+
+     RANK_GRP_KBN  ZKS1  ZKS2  ZKS3  ZKS4  ZKS5 HAISO_PTN_KBN  \
+0            94.0   NaN   NaN   NaN   NaN     0             C   
+1            94.0   NaN   NaN   NaN   NaN     0             C   
+2            94.0   NaN   NaN   NaN   NaN     0             C   
+3            94.0   NaN   NaN   NaN   NaN     0             C   
+4            94.0   NaN   NaN   NaN   NaN     0             C   
+..            ...   ...   ...   ...   ...   ...           ...   
+364          94.0   NaN   NaN   NaN   NaN     0             C   
+365          94.0   NaN   NaN   NaN   NaN     0             C   
+366          94.0   NaN   NaN   NaN   NaN     0             C   
+367          94.0   NaN   NaN   NaN   NaN     0             C   
+368          94.0   NaN   NaN   NaN   NaN     0             C   
+
+     HACCHU_IDO_PRO_FROM_YMD  HACCHU_IDO_PRO_TO_YMD  KAITEN_YMD  HEITEN_YMD  \
+0                   99999999               99999999    19960930    99999999   
+1                   20250616               20250803    20250616    99999999   
+2                   20250616               20250724    20250616    99999999   
+3                   20250616               20250803    20250616    99999999   
+4                   20250616               20250803    20250616    99999999   
+..                       ...                    ...         ...         ...   
+364                 99999999               99999999    20240116    99999999   
+365                 20240312               20240501    20240316    99999999   
+366                 99999999               99999999    20150521    99999999   
+367                 20240312               99999999    20200829    99999999   
+368                 20240318               20240320    20240316    99999999   
+
+     LAST_ZOSHO_YMD  SHIKICHI_MENSEKI  OKUNAI_URIBA_MENSEKI  \
+0               NaN               0.0                   0.0   
+1               NaN               NaN                   NaN   
+2               NaN               NaN                   NaN   
+3               NaN               NaN                   NaN   
+4               NaN               NaN                   NaN   
+..              ...               ...                   ...   
+364             NaN               NaN                   NaN   
+365             NaN               NaN                   NaN   
+366             NaN               NaN                   NaN   
+367             NaN               0.0                   0.0   
+368             NaN               0.0                   0.0   
+
+     OKUGAI_URIBA_MENSEKI  CHUSHA_KANO_DAISU GINKO_CD SHITEN_CD  \
+0                     0.0                0.0     0000       000   
+1                     NaN                NaN      NaN       NaN   
+2                     NaN                NaN     0001       310   
+3                     NaN                NaN      NaN       NaN   
+4                     NaN                NaN      NaN       NaN   
+..                    ...                ...      ...       ...   
+364                   NaN                NaN      NaN       NaN   
+365                   NaN                NaN      NaN       NaN   
+366                   NaN                NaN      NaN       NaN   
+367                   0.0                0.0     0000       000   
+368                   0.0                0.0     0000       000   
+
+     YOKIN_SHUBETSU_MISE_KOZA KOZA_NO_MISE_KOZA DENPYO_KOZA_MISE_KOZA  \
+0                         NaN           0000000                000000   
+1                         1.0               NaN                   NaN   
+2                         1.0           3117223                   NaN   
+3                         1.0               NaN                   NaN   
+4                         1.0               NaN                   NaN   
+..                        ...               ...                   ...   
+364                       1.0               NaN                   NaN   
+365                       1.0               NaN                   NaN   
+366                       1.0               NaN                   NaN   
+367                       NaN           0000000                000000   
+368                       NaN           0000000                000000   
+
+    KOZA_MEIGI_MISE_KOZA  YOKIN_SHUBETSU_URI_KOZA KOZA_NO_URI_KOZA  \
+0                      0                      NaN          0000000   
+1                    NaN                      1.0              NaN   
+2                    NaN                      1.0              NaN   
+3                    NaN                      1.0              NaN   
+4                    NaN                      1.0              NaN   
+..                   ...                      ...              ...   
+364                  NaN                      1.0              NaN   
+365                  NaN                      1.0              NaN   
+366                  NaN                      1.0              NaN   
+367                    0                      NaN          0000000   
+368                    0                      NaN          0000000   
+
+    DENPYO_KOZA_URI_KOZA KOZA_MEIGI_URI_KOZA  SUIAGE_GINKO_KBN  \
+0                 000000                   0               NaN   
+1                    NaN                 NaN               NaN   
+2                    NaN                 NaN               NaN   
+3                    NaN                 NaN               NaN   
+4                    NaN                 NaN               NaN   
+..                   ...                 ...               ...   
+364                  NaN                 NaN               NaN   
+365                  NaN                 NaN               NaN   
+366                  NaN                 NaN               NaN   
+367               000000                   0               NaN   
+368               000000                   0               NaN   
+
+     KAISO_FROM_YMD  KAISO_TO_YMD  MASTER_INITIAL_YMD  SA_SETUP_YMD  \
+0               NaN           NaN          19980318.0           NaN   
+1               NaN           NaN                 NaN           NaN   
+2               NaN           NaN          20250724.0           NaN   
+3               NaN           NaN                 NaN           NaN   
+4               NaN           NaN                 NaN           NaN   
+..              ...           ...                 ...           ...   
+364             NaN           NaN                 NaN           NaN   
+365             NaN           NaN                 NaN           NaN   
+366             NaN           NaN          20990101.0           NaN   
+367             NaN           NaN                 NaN           NaN   
+368             NaN           NaN                 NaN           NaN   
+
+     HACCHU_HONBAN_YMD  URIAGE_HONBAN_YMD  KEIJO_HONBAN_YMD  \
+0           19961106.0         19980324.0        19980324.0   
+1                  NaN                NaN               NaN   
+2           20250724.0         20250724.0        20250724.0   
+3                  NaN                NaN               NaN   
+4                  NaN                NaN               NaN   
+..                 ...                ...               ...   
+364                NaN                NaN               NaN   
+365         20240501.0         20240501.0        20240501.0   
+366         20150527.0         20150527.0        20150527.0   
+367                NaN                NaN               NaN   
+368         20240321.0         20240321.0        20240321.0   
+
+     KINTAI_HONBAN_YMD  YOSAN_HONBAN_YMD  PC_OUTPUT_YMD  \
+0           19961018.0        19961120.0     19980319.0   
+1                  NaN               NaN            NaN   
+2           20250724.0        20250724.0     20250724.0   
+3                  NaN               NaN            NaN   
+4                  NaN               NaN            NaN   
+..                 ...               ...            ...   
+364                NaN               NaN            NaN   
+365                NaN               NaN            NaN   
+366         20150527.0        20150527.0     20150527.0   
+367                NaN               NaN            NaN   
+368         20240321.0        20240321.0            NaN   
+
+     WK1_DATAHOST_HAISHIN_YMD  HACCHUTEN_MASTER_YMD  \
+0                         NaN                   NaN   
+1                         NaN                   NaN   
+2                         NaN                   NaN   
+3                         NaN                   NaN   
+4                         NaN                   NaN   
+..                        ...                   ...   
+364                       NaN                   NaN   
+365                       NaN                   NaN   
+366                       NaN                   NaN   
+367                       NaN                   NaN   
+368                       NaN                   NaN   
+
+     SNTN_HACCHU_RNRK_FROM_YMD  GAICHU_SEIGEN_KBN  TEN_KIBO  RICCHI_JOKEN_KBN  \
+0                          NaN                NaN      94.0               1.0   
+1                          NaN                NaN      94.0              90.0   
+2                   20250724.0                NaN      94.0              90.0   
+3                          NaN                NaN      94.0              90.0   
+4                          NaN                NaN      94.0              90.0   
+..                         ...                ...       ...               ...   
+364                        NaN                NaN      94.0              90.0   
+365                        NaN                NaN      94.0              90.0   
+366                        NaN                NaN      94.0               1.0   
+367                        NaN                NaN      94.0               1.0   
+368                        NaN                NaN      94.0              90.0   
+
+     URIBA_TSUBO_SU  KANZAN  GONDORA  HIRADAI_DAISU  GREEN_ICHIBA_CD  \
+0               NaN     NaN      NaN            NaN              NaN   
+1               NaN     NaN      NaN            NaN              NaN   
+2               NaN     NaN      NaN            NaN              NaN   
+3               NaN     NaN      NaN            NaN              NaN   
+4               NaN     NaN      NaN            NaN              NaN   
+..              ...     ...      ...            ...              ...   
+364             NaN     NaN      NaN            NaN              NaN   
+365             NaN     NaN      NaN            NaN              NaN   
+366             NaN     NaN      NaN            NaN              NaN   
+367             NaN     NaN      NaN            NaN              NaN   
+368             NaN     NaN      NaN            NaN              NaN   
+
+     PMM_TOROKU_SHORI_KBN  AREA_HENKO_FLG  PMM_IDO_PARAM_TOROKU_ZM_FLG  \
+0                       2               0                            0   
+1                       2               0                            1   
+2                       2               0                            1   
+3                       2               0                            1   
+4                       2               0                            1   
+..                    ...             ...                          ...   
+364                     2               0                            1   
+365                     2               0                            1   
+366                     2               0                            1   
+367                     2               0                            1   
+368                     2               0                            1   
+
+                      REG_DT UPD_USER_ID               BAT_UPD_DT  \
+0    2018-10-04 10:43:08.000    05046503  2018-10-05 03:12:11.000   
+1    2025-09-18 12:24:04.000    05046503  2025-09-19 02:59:10.000   
+2    2025-09-04 10:25:33.000    02227007  2025-09-05 03:28:53.000   
+3    2025-08-15 12:00:04.000    02227007  2025-08-16 03:38:56.000   
+4    2025-08-21 11:51:53.000    02227007  2025-09-22 02:58:52.000   
+..                       ...         ...                      ...   
+364  2024-10-08 15:20:07.000    02227007  2024-10-16 02:58:27.000   
+365  2024-06-03 16:30:45.000    02227007  2024-06-04 02:20:08.000   
+366  2018-10-04 10:51:43.000    05046503  2018-10-05 03:12:11.000   
+367  2024-04-02 18:21:38.000    02227007  2024-04-03 02:42:37.000   
+368  2024-05-09 15:13:39.000    02227007  2024-05-10 03:01:51.000   
+
+                  SCR_UPD_DT          BAT_ID          SCR_ID  UPD_MNG_NO  
+0    2018-10-04 10:43:08.000  MK020K0251_P01  MK020K0202_V01           1  
+1    2025-09-18 12:24:04.000  MK020K0251_P01  MK020K0202_V01           1  
+2    2025-09-04 10:25:33.000  MK020K0251_P01  MK020K0202_V01           1  
+3    2025-08-15 12:00:04.000  MK020K0284_P01  MK020K0202_V01           2  
+4    2025-08-21 11:51:53.000  MK030P1828_P01  MK020K0202_V01           2  
+..                       ...             ...             ...         ...  
+364  2024-10-08 15:20:07.000  MK020K0284_P01  MK020K0202_V01           2  
+365  2024-06-03 16:30:45.000  MK020K0251_P01  MK020K0202_V01           3  
+366  2018-10-04 10:51:43.000  MK020K0251_P01  MK020K0202_V01           1  
+367  2024-04-02 18:21:38.000  MK020K0284_P01  MK020K0202_V01           2  
+368  2024-05-09 15:13:39.000  MK020K0251_P01  MK020K0202_V01           1  
+
+
+
+
+
+
+
+selling_period_all = common.extract_as_df(path_selling_period, bucket_name)           tenpo_cd         prd_cd          prd_no  tanagae_hokoku_day  \
+0              737  4961691105374  20999983240001            20200929   
+1              154  4549509314523  16126010000005            20171025   
+2              806  4901609011359  19999987320016            20190422   
+3              807  4987072038505  15999987320016            20151218   
+4              790  4956810861606  16999975900006            20160901   
+...            ...            ...             ...                 ...   
+42224565       752  4549509839019  21006310002022            20220522   
+42224566       282  4905284146412   9000010146803            20140118   
+42224567       736  4902430709668  16999987140111            20170220   
+42224568       250  4549509395331  17025292800004            20180423   
+42224569       233  4901210169746  14999917500006            20140704   
+
+          hacchu_to_ymd  
+0              99999999  
+1              99999999  
+2              99999999  
+3              99999999  
+4              99999999  
+...                 ...  
+42224565       20220330  
+42224566       20130219  
+42224567       20171014  
+42224568       20190620  
+42224569       20141111  
+
+
+
+
+
+
+
+
+
+
+prd_asc = common.extract_as_df(path_prd_asc, bucket_name)               prd_cd  dpt                  prd_nm_kj  baika_toitsu  \
+0           47478640   77   ＜長野＞Ｃよなよなエール　ビール　３５０缶×２４          6580   
+1        41570112366   64       Ｃアーモンドブリーズオリジナル１Ｌ×６本          1750   
+2        41570112380   64       Ｃアーモンドブリーズ砂糖不使用１Ｌ×６本          1750   
+3        71990095116   77             ブルームーン　３５５ｍｌ×６          1968   
+4        71990095123   77           Ｃブルームーン　３５５ｍｌ×２４          7850   
+...              ...  ...                        ...           ...   
+30561  8801048167814   77       ▼Ｃ韓国焼酎　２０°眞露　４Ｌペット×４          9500   
+30562  8801119684417   77  ＪＩＮＲＯｈｉｔｅｄ（ハイトディ）３５０Ｘ６缶パッ           870   
+30563  8801119684424   77  ＣＪＩＮＲＯ　Ｈｉｔｅ（ハイトディ）３５０Ｘ６缶パ          3480   
+30564  8801119684424   77  ＣＪＩＮＲＯ　Ｈｉｔｅ（ハイトディ）３５０Ｘ６缶パ          3480   
+30565  8801147110537   77    Ｃアサヒ　韓国焼酎　韓楽　２０°２．７Ｌケース          7680   
+
+       hacchu_tani_toitsu_kosu  daihyo_torihikisaki_cd daihyo_torihikisaki_nm  \
+0                            1                  926221    日本酒類販売（株）流通第三本部営業二部   
+1                            1                  762148        マルサンアイ（株）　関信越支店   
+2                            1                  762148        マルサンアイ（株）　関信越支店   
+3                            4                  987956              ＰＯＳ　ＰＬＵ登録   
+4                            1                  926221    日本酒類販売（株）流通第三本部営業二部   
+...                        ...                     ...                    ...   
+30561                        1                  987956              ＰＯＳ　ＰＬＵ登録   
+30562                        1                  987956              ＰＯＳ　ＰＬＵ登録   
+30563                        1                  926221    日本酒類販売（株）流通第三本部営業二部   
+30564                        1                  926221    日本酒類販売（株）流通第三本部営業二部   
+30565                        1                  987956              ＰＯＳ　ＰＬＵ登録   
+
+       asc_riyu_cd  iri_su     asc_prd_cd  asc_dpt              asc_prd_nm_kj  \
+0                3      24       47478619       77              よなよなエール　３５０ｍｌ   
+1                3       6    41570112359       64           アーモンドブリーズオリジナル１Ｌ   
+2                3       6    41570112373       64           アーモンドブリーズ砂糖不使用１Ｌ   
+3                3       6  4902335060017       77               ブルームーン　３５５ｍｌ   
+4                3       4    71990095116       77             ブルームーン　３５５ｍｌ×６   
+...            ...     ...            ...      ...                        ...   
+30561            3       4  8801048167210       77        ▼韓国焼酎　眞露（ジンロ）２０°　４Ｌ   
+30562            3       6  8801119684400       77  ＪＩＮＲＯｈｉｔｅｄ（ハイトディ）３５０Ｘ６缶バラ   
+30563            3      24  8801119684400       77  ＪＩＮＲＯｈｉｔｅｄ（ハイトディ）３５０Ｘ６缶バラ   
+30564            3       4  8801119684417       77  ＪＩＮＲＯｈｉｔｅｄ（ハイトディ）３５０Ｘ６缶パッ   
+30565            3       6  8801147100507       77  Ｑアサヒ　国焼酎　韓楽（ハンラク）２０°　２．７Ｌ   
+
+       asc_baika_toitsu  asc_hacchu_tani_toitsu_kosu  \
+0                   278                           24   
+1                   298                            6   
+2                   298                            6   
+3                   328                           24   
+4                  1968                            4   
+...                 ...                          ...   
+30561              2480                            4   
+30562               145                            1   
+30563               145                            1   
+30564               870                            1   
+30565              1280                            6   
+
+       asc_daihyo_torihikisaki_cd asc_daihyo_torihikisaki_nm  
+0                          987956                  ＰＯＳ　ＰＬＵ登録  
+1                          987956                  ＰＯＳ　ＰＬＵ登録  
+2                          987956                  ＰＯＳ　ＰＬＵ登録  
+3                          987956                  ＰＯＳ　ＰＬＵ登録  
+4                          987956                  ＰＯＳ　ＰＬＵ登録  
+...                           ...                        ...  
+30561                      926221        日本酒類販売（株）流通第三本部営業二部  
+30562                      987956                  ＰＯＳ　ＰＬＵ登録  
+30563                      987956                  ＰＯＳ　ＰＬＵ登録  
+30564                      987956                  ＰＯＳ　ＰＬＵ登録  
+30565                      770663       伊藤忠食品（株）東日本営業本部営業第三部 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+chance_loss_data         BUMON_CD  TENPO_CD          PRD_NO  NENSHUDO         PRD_CD  \
+0            002       760  09000010000227    202352       45113697   
+1            011       760  58750900000659    202430  4549917217485   
+2            023       760  15999923000005    202130  4548792000731   
+3            023       760  15999923460002    202053  4902993101947   
+4            032       760  09000010163145    202013  4909246303318   
+...          ...       ...             ...       ...            ...   
+1329167      094       760  19999994520005    202438  4975302540218   
+1329168      094       760  20999994100001    202008  4573110734128   
+1329169      094       760  51115700000050    202333  4944370042351   
+1329170      094       760  59470830000292    202440  4983771114601   
+1329171      094       760  59491670000190    202305  4981747074133   
+
+         KEPPIN_CNT  CHANCE_LOSS_PRD_SU  CHANCE_LOSS_KN  
+0                 7                 0.0             0.0  
+1                 7                 0.0             0.0  
+2                 3                 0.0             0.0  
+3                 6                 0.0             0.0  
+4                 3                 1.0           784.0  
+...             ...                 ...             ...  
+1329167           3                 0.0             0.0  
+1329168           3                 0.0             0.0  
+1329169           7                 0.0             0.0  
+1329170           4                 1.0          4882.0  
+1329171           7                 0.0             0.0  
+
+[1329172 rows x 8 columns]
+jan_master             店着日  old_DPT        old_JAN  how_change  new_DPT        new_JAN  \
+0      20170105       18  4560464244311           7       18  4976790775304   
+1      20170105       18  4976790761499           7       18  4549509238133   
+2      20170105       18  4971404308190           8       18  4971404313064   
+3      20170105       91  4936695453479           8       91  4549509167846   
+4      20170105       91  4936695453516           8       91  4549509167839   
+...         ...      ...            ...         ...      ...            ...   
+43597  20250925       91  4973007525912           2       91  4974267132377   
+43598  20250925       91  4973007006688           2       91  4973007006664   
+43599  20250925       91  4571175633455           3       91  4571175633745   
+43600  20250925       91  4979969804973           2       91  4545708004180   
+43601  20250925       94  4936695985604           8       94  4972353135066   
+
+        店番  
+0      760  
+1      760  
+2      760  
+3      760  
+4      760  
+...    ...  
+43597  760  
+43598  760  
+43599  760  
+43600  760  
+43601  760  
+
+[43602 rows x 7 columns]
+store_prd_hacchu_ymd                  PRD_CD  TENPO_CD  HACCHU_YMD_SEQ_NO  HACCHU_FROM_YMD  \
+0         4936695722605       758                5.0       20140831.0   
+1         4936695722605       759                5.0       20140831.0   
+2         4936695722605       760                5.0       20140831.0   
+3         4936695722605       763                5.0       20140831.0   
+4         4936695722605       764                5.0       20140831.0   
+...                 ...       ...                ...              ...   
+73230827  4901099033176       772                1.0       20190709.0   
+73230828  4901099033176       774                5.0       20190731.0   
+73230829  4901099033176       775                1.0       20190709.0   
+73230830  4901099033176       777                5.0       20190731.0   
+73230831  4901099033176       779                5.0       20190731.0   
+
+          HACCHU_TO_YMD  
+0              20140831  
+1              20140831  
+2              20140831  
+3              20140831  
+4              20140831  
+...                 ...  
+73230827       99999999  
+73230828       20190731  
+73230829       99999999  
+73230830       20190731  
+73230831       20190731  
+
+[73230832 rows x 5 columns]
+dfm_base          hojin_cd          prd_no  prd_no_br_no  honbu_cd  jigyobu_cd  \
+0              24  59292470000074             0         2           3   
+1              24  59292470000172             0         2           3   
+2              24  16999902000014             0         2           3   
+3              24  18999902000012             0         2           3   
+4              24   9000010117230             0         2           3   
+...           ...             ...           ...       ...         ...   
+1039027        24  53121850000982             0         1           6   
+1039028        24  57482420000284             0         1           6   
+1039029        24   9000010365524             0         1           6   
+1039030        24  17999997510030             0         1           6   
+1039031        24  14999936000002             0         9          98   
+
+         bumon_cd  line_cd  cls_cd  nendo  prd_pln_no      hnmk_cd  \
+0               2       20     200   2022         NaN  99292470200   
+1               2       20     200   2024         NaN  99292470200   
+2               2       20     200   2016         NaN  99999990200   
+3               2       20     200   2018         NaN  99999990200   
+4               2       20     200   2009         NaN  99020000089   
+...           ...      ...     ...    ...         ...          ...   
+1039027        97      975    9751   2024         NaN  93121859751   
+1039028        97      975    9751   2023         NaN  23000010284   
+1039029        97      975    9751   2009         NaN  99999999751   
+1039030        97      975    9753   2017         NaN  99470839753   
+1039031        98      980    9800   2014   1000061.0  10000610200   
+
+         maint_from_ymd  maint_to_ymd         prd_cd  eos_cd  sku_kbn_cd  \
+0              20240511      99999999       45213878     0.0           1   
+1              20240814      99999999       45219467     0.0           1   
+2              20201001      99999999       49401349     0.0           1   
+3              20240917      99999999  4902210130019     0.0           1   
+4              20240808      99999999  4902210142616     0.0           1   
+...                 ...           ...            ...     ...         ...   
+1039027        20250808      99999999  4963027421240     0.0           1   
+1039028        20250919      99999999  4983936414676     0.0           1   
+1039029        20150514      99999999  4984824793927     0.0           1   
+1039030        20220713      99999999  4580088470125     0.0           1   
+1039031        20191001      99999999  4549509043706     0.0           1   
+
+                          prd_nm_k                   prd_nm_kj  \
+0           ﾒﾋﾞｳｽ･ｲｰｼﾘｰｽﾞ･3･100･1P        メビウス・イーシリーズ・３・１００・１Ｐ   
+1                         ｴｺｰKS_1P                    エコーＫＳ＿１Ｐ   
+2         ｳｨﾝｽﾄﾝﾐﾆﾋﾞﾀｰｽｲｰﾄﾎﾜｲﾄﾜﾝ1P     ウィンストンミニビタースイートホワイトワン１Ｐ   
+3        ﾒﾋﾞｳｽﾐｯｸｽGｸｰﾗｰﾌｫｰﾌﾟﾙｰﾑﾃｯｸ  ＱＣメビウスミックスグリーンクーラーフォープルームテ   
+4              Qﾒﾋﾞｳｽ･ｺﾞｰﾙﾄﾞ･6 10P           ＱＣメビウス・ゴールド・６　１０個   
+...                            ...                         ...   
+1039027  ｱﾋﾟｯｸｽ ﾁｮｳｵﾝﾊﾟｼｷｶｼﾂｷ AHD-   アピックス　超音波式加湿器　ＡＨＤ－１２４（ＧＲ）   
+1039028            ｴﾚｽ ｱﾛﾐｽﾄﾌﾚｰﾑBK             エレス　アロミストフレームＢＫ   
+1039029     ﾅｼｮﾅﾙ ｶｼﾂｷ FE-03TLB-AH   ナショナルハイブリッド加湿器ＦＥ－０３ＴＬＢ－ＡＨ   
+1039030     ｳｨﾙｽﾀｲｻｸｵﾁｬﾉﾁｶﾗ PKMM02         ウィルス対策お茶のちから　ＰＫＭＭ０２   
+1039031                          -                        ×テスト   
+
+                    prd_nm_k_czpos            prd_nm_kj_czpos  \
+0           ﾒﾋﾞｳｽ･ｲｰｼﾘｰｽﾞ･3･100･1P       メビウス・イーシリーズ・３・１００・１Ｐ   
+1                         ｴｺｰKS_1P                   エコーＫＳ＿１Ｐ   
+2         ｳｨﾝｽﾄﾝﾐﾆﾋﾞﾀｰｽｲｰﾄﾎﾜｲﾄﾜﾝ1P    ウィンストンミニビタースイートホワイトワン１Ｐ   
+3        ﾒﾋﾞｳｽﾐｯｸｽGｸｰﾗｰﾌｫｰﾌﾟﾙｰﾑﾃｯｸ  ＱＣメビウスミックスグリーンクーラーフォープルーム   
+4              Qﾒﾋﾞｳｽ･ｺﾞｰﾙﾄﾞ･6 10P          ＱＣメビウス・ゴールド・６　１０個   
+...                            ...                        ...   
+1039027  ｱﾋﾟｯｸｽ ﾁｮｳｵﾝﾊﾟｼｷｶｼﾂｷ AHD-  アピックス　超音波式加湿器　ＡＨＤ－１２４（ＧＲ）   
+1039028            ｴﾚｽ ｱﾛﾐｽﾄﾌﾚｰﾑBK            エレス　アロミストフレームＢＫ   
+1039029     ﾅｼｮﾅﾙ ｶｼﾂｷ FE-03TLB-AH  ナショナルハイブリッド加湿器ＦＥ－０３ＴＬＢ－ＡＨ   
+1039030     ｳｨﾙｽﾀｲｻｸｵﾁｬﾉﾁｶﾗ PKMM02        ウィルス対策お茶のちから　ＰＫＭＭ０２   
+1039031                          -                       ×テスト   
+
+                     prd_nm_kj_full prd_nm_receipt  kataban  hanbai_koku_cd  \
+0              メビウス・イーシリーズ・３・１００・１Ｐ   MVE･3･100・1P      NaN             1.0   
+1                          エコーＫＳ＿１Ｐ       エコーKS_１P      NaN             1.0   
+2           ウィンストンミニビタースイートホワイトワン１Ｐ   ｳｨﾝｽﾄﾝﾎﾜｲﾄ1P      NaN             1.0   
+3        ＱＣメビウスミックスグリーンクーラーフォープルームテ           ミックス      NaN             1.0   
+4                 ＱＣメビウス・ゴールド・６　１０個   ﾒﾋﾞｳｽ･ｺﾞｰﾙﾄﾞ      NaN             1.0   
+...                             ...            ...      ...             ...   
+1039027   アピックス　超音波式加湿器　ＡＨＤ－１２４（ＧＲ）            加湿器      NaN             1.0   
+1039028             エレス　アロミストフレームＢＫ            加湿器  AMF23BK             1.0   
+1039029   ナショナルハイブリッド加湿器ＦＥ－０３ＴＬＢ－ＡＨ   ｶｼﾂｷFE-03TLB      NaN             1.0   
+1039030         ウィルス対策お茶のちから　ＰＫＭＭ０２        ｵﾁｬﾉﾁｶﾗ   PKMM02             1.0   
+1039031                        ×テスト              ×      NaN             1.0   
+
+         daihyo_torihikisaki_cd maker_no  maker_depot_kbn  nohin_keitai_kbn  \
+0                      929247.0       45                0                 0   
+1                      929247.0       45                0                 0   
+2                      929247.0       49                0                 1   
+3                      929247.0     2210                0                 1   
+4                      929247.0     2210                0                 1   
+...                         ...      ...              ...               ...   
+1039027                312185.0    63027                0                 1   
+1039028                748242.0    83936                0                 0   
+1039029                924229.0    84824                0                 1   
+1039030                947083.0    80088                0                 1   
+1039031                987956.0     6456                0                 1   
+
+         hacchu_tani_toitsu_kosu  tenpo_hacchu_sum_kbn  prd_sku_shubetsu_cd  \
+0                           10.0                     0                  1.0   
+1                           10.0                     0                  1.0   
+2                           10.0                     0                  1.0   
+3                            1.0                     0                  1.0   
+4                            1.0                     0                  1.0   
+...                          ...                   ...                  ...   
+1039027                      1.0                     0                  1.0   
+1039028                      2.0                     1                  1.0   
+1039029                      1.0                     0                  1.0   
+1039030                      1.0                     1                  1.0   
+1039031                      1.0                     0                  1.0   
+
+         case_prd_cfg_flg  assort_prd_cfg_flg  shoki_genka  shoki_baika  \
+0                       0                   0       404.00          500   
+1                       0                   0       404.54          500   
+2                       0                   0       313.85          380   
+3                       0                   0      2279.56         2760   
+4                       0                   0      3494.76         4100   
+...                   ...                 ...          ...          ...   
+1039027                 0                   0      4171.00         7980   
+1039028                 0                   0      2150.00         3980   
+1039029                 0                   0      7200.00         9980   
+1039030                 0                   0       635.00          980   
+1039031                 0                   0       100.00          150   
+
+         genka_toitsu  baika_toitsu  season_cd  color_nm_cd  size_cd  \
+0              404.00           500        1.0          NaN      NaN   
+1              404.54           500        1.0          NaN      NaN   
+2              364.09           450        1.0          NaN      NaN   
+3             2816.00          3480        1.0          NaN      NaN   
+4             4693.00          5800        1.0          NaN      NaN   
+...               ...           ...        ...          ...      ...   
+1039027       4171.00          7980       80.0          NaN      NaN   
+1039028       2150.00          3980       80.0          NaN      NaN   
+1039029       7200.00          9980        1.0          NaN      NaN   
+1039030        635.00           280        1.0          7.0      NaN   
+1039031        100.00           150        1.0          NaN      NaN   
+
+         low_price_kbn  ssk_kbn  kkng_seihin_kbn  seisan_koku_cd  pbsb_nm_kbn  \
+0                    0        0                0               1            0   
+1                    0        0                0               1            0   
+2                    0        0                0               1            0   
+3                    0        0                0               1            0   
+4                    0        0                0               1            0   
+...                ...      ...              ...             ...          ...   
+1039027              0        0                0             101            0   
+1039028              0        0                0             101            0   
+1039029              0        0                0               1            0   
+1039030              0        0                0               1            0   
+1039031              0        0                0             101            0   
+
+         frm_kbn  chilled_kbn  label_shu_kbn  label_hakko_maisu_kbn  \
+0              0            0              0                      0   
+1              0            0              0                      0   
+2              0            0              0                      0   
+3              0            0              0                      0   
+4              0            0              0                      0   
+...          ...          ...            ...                    ...   
+1039027        0            0              0                      0   
+1039028        0            0              0                      0   
+1039029        0            0              0                      0   
+1039030        0            0              0                      0   
+1039031        0            0              0                      0   
+
+         royalties_kbn  keikaku_su  hanbai_from_ymd  hanbai_to_ymd  \
+0                  0.0           0              NaN            NaN   
+1                  0.0           0              NaN            NaN   
+2                  0.0           0              NaN            NaN   
+3                  0.0           0              NaN            NaN   
+4                  0.0           0              NaN            NaN   
+...                ...         ...              ...            ...   
+1039027            0.0           0              NaN     20250616.0   
+1039028            0.0           0              NaN            NaN   
+1039029            0.0           0              NaN            NaN   
+1039030            0.0           0              NaN            NaN   
+1039031            0.0           0              NaN            NaN   
+
+         hanbai_end_flg  tenpo_hacchu_from_ymd_toitsu  \
+0                     0                    20221007.0   
+1                     0                    20240814.0   
+2                     0                    20170212.0   
+3                     0                    20180829.0   
+4                     0                    20071201.0   
+...                 ...                           ...   
+1039027               1                    20240802.0   
+1039028               0                    20230715.0   
+1039029               0                    20070809.0   
+1039030               0                    20170726.0   
+1039031               0                           NaN   
+
+         tenpo_hacchu_to_ymd_toitsu  tenpo_hacchu_end_riyu_cd  \
+0                        20240510.0                       NaN   
+1                        99999999.0                       NaN   
+2                        20170212.0                       NaN   
+3                        20240916.0                       NaN   
+4                        20240812.0                       NaN   
+...                             ...                       ...   
+1039027                  20250807.0                       NaN   
+1039028                  20251231.0                       NaN   
+1039029                  20071217.0                       NaN   
+1039030                  20190310.0                       NaN   
+1039031                         NaN                       NaN   
+
+         tenpo_hacchu_end_flg  honbu_hacchu_from_ymd  honbu_hacchu_to_ymd  \
+0                           1                    NaN                  NaN   
+1                           0                    NaN                  NaN   
+2                           1                    NaN                  NaN   
+3                           1                    NaN                  NaN   
+4                           1                    NaN                  NaN   
+...                       ...                    ...                  ...   
+1039027                     1                    NaN                  NaN   
+1039028                     0                    NaN                  NaN   
+1039029                     1                    NaN                  NaN   
+1039030                     1                    NaN                  NaN   
+1039031                     0                    NaN                  NaN   
+
+         honbu_hacchu_end_flg  zaiko_iji_from_ymd  zaiko_iji_to_ymd  \
+0                           0                 NaN               NaN   
+1                           0                 NaN               NaN   
+2                           0                 NaN               NaN   
+3                           0                 NaN               NaN   
+4                           0                 NaN               NaN   
+...                       ...                 ...               ...   
+1039027                     0                 NaN               NaN   
+1039028                     0                 NaN               NaN   
+1039029                     0                 NaN               NaN   
+1039030                     0                 NaN               NaN   
+1039031                     0                 NaN               NaN   
+
+         zaiko_iji_end_flg  shibai_from_ymd  shibai_to_ymd  choaisaki_ptn_cd  \
+0                        0              NaN            NaN                 0   
+1                        0              NaN            NaN                 0   
+2                        0              NaN            NaN                 0   
+3                        0              NaN            NaN                 0   
+4                        0              NaN            NaN                 0   
+...                    ...              ...            ...               ...   
+1039027                  0              NaN            NaN                 0   
+1039028                  0              NaN            NaN                 0   
+1039029                  0              NaN            NaN                 0   
+1039030                  0              NaN            NaN                 0   
+1039031                  0              NaN            NaN                 0   
+
+         prd_kbn_cd  juten_kbn  kiriuri_chk_kbn  zaiko_kanri_kbn  \
+0                 1          0                0                1   
+1                 1          0                0                1   
+2                 1          0                0                1   
+3                 1          0                0                1   
+4                 1          0                0                1   
+...             ...        ...              ...              ...   
+1039027           1          0                0                1   
+1039028           2          0                0                1   
+1039029           1          7                0                1   
+1039030           2          0                0                1   
+1039031           1          0                0                1   
+
+         shiire_joken_kbn  brand_kbn zaiko_kasho_kbn  tc4_dc4_kbn  \
+0                       1          1               0            0   
+1                       1          1               0            0   
+2                       1          1               0            0   
+3                       1          1               0            0   
+4                       1          1               0            0   
+...                   ...        ...             ...          ...   
+1039027                 1          1               0            0   
+1039028                 1          1               0            0   
+1039029                 1          1               0            0   
+1039030                 1          1               0            0   
+1039031                 1          1               0            0   
+
+         picking_list_hakko_kbn  tks_center_kbn  hoshosho_umu_kbn  \
+0                             0               0               0.0   
+1                             0               0               0.0   
+2                             0               0               0.0   
+3                             0               0               0.0   
+4                             0               0               0.0   
+...                         ...             ...               ...   
+1039027                       0               0               1.0   
+1039028                       0               0               1.0   
+1039029                       0               0               1.0   
+1039030                       0               0               0.0   
+1039031                       0               0               0.0   
+
+         fukusu_konpo_kbn  konpo_su  vmi_toroku_flg  naiyoryo  \
+0                     0.0         1               0       0.0   
+1                     0.0         1               0       0.0   
+2                     0.0         1               0       0.0   
+3                     0.0         1               0       0.0   
+4                     0.0         1               0       0.0   
+...                   ...       ...             ...       ...   
+1039027               0.0         1               0       0.0   
+1039028               0.0         1               0       0.0   
+1039029               0.0         1               0       0.0   
+1039030               0.0         1               0       0.0   
+1039031               0.0         1               0       0.0   
+
+         naiyoryo_tani_cd  shomi_juryo  shomi_juryo_tani_cd  saisu_h  saisu_w  \
+0                       0          0.0                    3        0        0   
+1                       0          0.0                    3        0        0   
+2                       0          0.0                    3        0        0   
+3                       0          0.0                    3        0        0   
+4                       0          0.0                    3        0        0   
+...                   ...          ...                  ...      ...      ...   
+1039027                 0          0.0                    3        0        0   
+1039028                 0          0.0                    3        0        0   
+1039029                 0          0.0                    3        0        0   
+1039030                 0          0.0                    3        0        0   
+1039031                 0          0.0                    3        0        0   
+
+         saisu_d  itf_cd  gtin_cd prd_nm_en prd_nm_en_czpos butsuryu_ptn_cd  \
+0              0       0      NaN       NaN             NaN             NaN   
+1              0       0      NaN       NaN             NaN             NaN   
+2              0       0      NaN       NaN             NaN             NaN   
+3              0       0      NaN       NaN             NaN             NaN   
+4              0       0      NaN       NaN             NaN             NaN   
+...          ...     ...      ...       ...             ...             ...   
+1039027        0       0      NaN       NaN             NaN             NaN   
+1039028        0       0      NaN       NaN             NaN             NaN   
+1039029        0       0      NaN       NaN             NaN             NaN   
+1039030        0       0      NaN       NaN             NaN             NaN   
+1039031        0       0      NaN       NaN             NaN             NaN   
+
+         maker_cd_kaigai  kojo_cd  tsuka_cd  kawase_rt  kakaku_cd  \
+0                    0.0      0.0       NaN        0.0        NaN   
+1                    0.0      0.0       NaN        0.0        NaN   
+2                    0.0      0.0       NaN        0.0        NaN   
+3                    0.0      0.0       NaN        0.0        NaN   
+4                    0.0      0.0       NaN        0.0        NaN   
+...                  ...      ...       ...        ...        ...   
+1039027              0.0      0.0       NaN        0.0        NaN   
+1039028              0.0      0.0       NaN        0.0        NaN   
+1039029              0.0      0.0       NaN        0.0        NaN   
+1039030              0.0      0.0       NaN        0.0        NaN   
+1039031              0.0      0.0       NaN        0.0        NaN   
+
+         tsuka_genka  piece_case_kbn  soto_iri_su_piece  naka_iri_su_piece  \
+0                0.0             NaN                  0                  0   
+1                0.0             NaN                  0                  0   
+2                0.0             NaN                  0                  0   
+3                0.0             NaN                  0                  0   
+4                0.0             NaN                  0                  0   
+...              ...             ...                ...                ...   
+1039027          0.0             NaN                  0                  0   
+1039028          0.0             NaN                  0                  0   
+1039029          0.0             NaN                  0                  0   
+1039030          0.0             NaN                  0                  0   
+1039031          0.0             NaN                  0                  0   
+
+         gaiso_kosu_tani_cd  seisan_lot  shukka_lot  bunkatsu_kaisu  \
+0                       NaN           0           0               0   
+1                       NaN           0           0               0   
+2                       NaN           0           0               0   
+3                       NaN           0           0               0   
+4                       NaN           0           0               0   
+...                     ...         ...         ...             ...   
+1039027                 NaN           0           0               0   
+1039028                 NaN           0           0               0   
+1039029                 NaN           0           0               0   
+1039030                 NaN           0           0               0   
+1039031                 NaN           0           0               0   
+
+         soko_hokan_kikan_nissu  soto_w_w_cm  soto_d_d_cm  soto_h_h_cm   m3  \
+0                             0          0.0          0.0          0.0  0.0   
+1                             0          0.0          0.0          0.0  0.0   
+2                             0          0.0          0.0          0.0  0.0   
+3                             0          0.0          0.0          0.0  0.0   
+4                             0          0.0          0.0          0.0  0.0   
+...                         ...          ...          ...          ...  ...   
+1039027                       0          0.0          0.0          0.0  0.0   
+1039028                       0          0.0          0.0          0.0  0.0   
+1039029                       0          0.0          0.0          0.0  0.0   
+1039030                       0          0.0          0.0          0.0  0.0   
+1039031                       0          0.0          0.0          0.0  0.0   
+
+         soto_juryo  soto_juryo_tani_cd  naka_w_w  naka_d_d  naka_h_h  \
+0               0.0                   1       0.0       0.0       0.0   
+1               0.0                   1       0.0       0.0       0.0   
+2               0.0                   1       0.0       0.0       0.0   
+3               0.0                   1       0.0       0.0       0.0   
+4               0.0                   1       0.0       0.0       0.0   
+...             ...                 ...       ...       ...       ...   
+1039027         0.0                   1       0.0       0.0       0.0   
+1039028         0.0                   1       0.0       0.0       0.0   
+1039029         0.0                   1       0.0       0.0       0.0   
+1039030         0.0                   1       0.0       0.0       0.0   
+1039031         0.0                   1       0.0       0.0       0.0   
+
+         kowake_w_w  kowake_d_d  kowake_h_h  shiwake_kbn_cd  seisan_lead_time  \
+0               0.0         0.0         0.0               0                 0   
+1               0.0         0.0         0.0               0                 0   
+2               0.0         0.0         0.0               0                 0   
+3               0.0         0.0         0.0               0                 0   
+4               0.0         0.0         0.0               0                 0   
+...             ...         ...         ...             ...               ...   
+1039027         0.0         0.0         0.0               0                 0   
+1039028         0.0         0.0         0.0               0                 0   
+1039029         NaN         NaN         NaN               0                 0   
+1039030         0.0         0.0         0.0               0                 0   
+1039031         NaN         NaN         NaN               0                 0   
+
+         shidashichi_cd  zks1  suryo_tani_cd  seisan_hacchu_tekiyo_from_ymd  \
+0                   NaN   0.0            NaN                     20221007.0   
+1                   NaN   0.0            NaN                     20240810.0   
+2                   NaN   0.0            NaN                     20170212.0   
+3                   NaN   0.0            NaN                     20180828.0   
+4                   NaN   0.0            NaN                     20000101.0   
+...                 ...   ...            ...                            ...   
+1039027             NaN   0.0            NaN                     20240726.0   
+1039028             NaN   0.0            NaN                     20230711.0   
+1039029             NaN   0.0            NaN                     20000101.0   
+1039030             NaN   0.0            NaN                     20170726.0   
+1039031             NaN   0.0            NaN                     20000101.0   
+
+         seisan_hacchu_tekiyo_to_ymd  zeiban_zeiban  zeiban_tokei_saibun  \
+0                         99999999.0            0.0                  0.0   
+1                         99999999.0            0.0                  0.0   
+2                         99999999.0            0.0                  0.0   
+3                         99999999.0            0.0                  0.0   
+4                         99999999.0            0.0                  0.0   
+...                              ...            ...                  ...   
+1039027                   99999999.0            0.0                  0.0   
+1039028                   99999999.0            0.0                  0.0   
+1039029                   99999999.0            0.0                  0.0   
+1039030                   99999999.0            0.0                  0.0   
+1039031                   99999999.0            0.0                  0.0   
+
+         prd_kaihatsusha_cd  saitei_chinretsu_su  saitei_chinretsu_su_shoki  \
+0                       0.0                    0                          0   
+1                       0.0                    0                          0   
+2                       0.0                    0                          0   
+3                       0.0                    0                          0   
+4                       0.0                    0                          0   
+...                     ...                  ...                        ...   
+1039027                 0.0                    0                          0   
+1039028                 0.0                    0                          0   
+1039029                 0.0                    0                          0   
+1039030                 0.0                    0                          0   
+1039031                 0.0                    0                          0   
+
+         price_card_kbn  maker_kibo_kouri_kn  neire_chk_kbn  pkg_baika_flg  \
+0                     2                    0              0            0.0   
+1                     2                    0              0            0.0   
+2                     4                    0              0            0.0   
+3                     4                    0              0            0.0   
+4                     4                    0              0            0.0   
+...                 ...                  ...            ...            ...   
+1039027               2                    0              0            0.0   
+1039028               2                    0              0            0.0   
+1039029               2                    0              0            0.0   
+1039030               2                    0              0            0.0   
+1039031               2                    0              0            0.0   
+
+         shohi_zei_kbn  shohi_zei_rt  saitei_hacchu_su  \
+0                    0            10                10   
+1                    0            10                10   
+2                    0            10                10   
+3                    0            10                 1   
+4                    0            10                 1   
+...                ...           ...               ...   
+1039027              0            10                 1   
+1039028              0            10                 2   
+1039029              0             8                 1   
+1039030              0            10                 1   
+1039031              0            10                 1   
+
+         container_sekisai_shu_nm  hoken_kn  hoken_kn_rt  \
+0                             NaN       0.0          0.0   
+1                             NaN       0.0          0.0   
+2                             NaN       0.0          0.0   
+3                             NaN       0.0          0.0   
+4                             NaN       0.0          0.0   
+...                           ...       ...          ...   
+1039027                       NaN       0.0          0.0   
+1039028                       NaN       0.0          0.0   
+1039029                       NaN       NaN          NaN   
+1039030                       NaN       0.0          0.0   
+1039031                       NaN       0.0          0.0   
+
+         bt_dec_kn_imp_dec_kn  toriatsukai_kn_zochi_kn  kensa_kn  \
+0                         0.0                      0.0       0.0   
+1                         0.0                      0.0       0.0   
+2                         0.0                      0.0       0.0   
+3                         0.0                      0.0       0.0   
+4                         0.0                      0.0       0.0   
+...                       ...                      ...       ...   
+1039027                   0.0                      0.0       0.0   
+1039028                   0.0                      0.0       0.0   
+1039029                   NaN                      NaN       NaN   
+1039030                   0.0                      0.0       0.0   
+1039031                   0.0                      0.0       0.0   
+
+         lc_charge_do  container_sekisai_m3  freight_d  cy_charge  dray  \
+0                 0.0                   0.0        0.0        0.0   0.0   
+1                 0.0                   0.0        0.0        0.0   0.0   
+2                 0.0                   0.0        0.0        0.0   0.0   
+3                 0.0                   0.0        0.0        0.0   0.0   
+4                 0.0                   0.0        0.0        0.0   0.0   
+...               ...                   ...        ...        ...   ...   
+1039027           0.0                   0.0        0.0        0.0   0.0   
+1039028           0.0                   0.0        0.0        0.0   0.0   
+1039029           NaN                   NaN        NaN        NaN   NaN   
+1039030           0.0                   0.0        0.0        0.0   0.0   
+1039031           0.0                   0.0        0.0        0.0   0.0   
+
+         container_nioroshi_kn  butsuryo_chinryo_rt  old_fob_tanka_d  \
+0                          0.0                  0.0              0.0   
+1                          0.0                  0.0              0.0   
+2                          0.0                  0.0              0.0   
+3                          0.0                  0.0              0.0   
+4                          0.0                  0.0              0.0   
+...                        ...                  ...              ...   
+1039027                    0.0                  0.0              0.0   
+1039028                    0.0                  0.0              0.0   
+1039029                    NaN                  NaN              NaN   
+1039030                    0.0                  0.0              0.0   
+1039031                    0.0                  0.0              0.0   
+
+         new_fob_tanka_d  kanzei_rt  inner_iri_su  master_carton_iri_su  \
+0                    0.0        0.0           0.0                   0.0   
+1                    0.0        0.0           0.0                   0.0   
+2                    0.0        0.0           0.0                   0.0   
+3                    0.0        0.0           0.0                   0.0   
+4                    0.0        0.0           0.0                   0.0   
+...                  ...        ...           ...                   ...   
+1039027              0.0        0.0           0.0                   0.0   
+1039028              0.0        0.0           0.0                   0.0   
+1039029              NaN        NaN           NaN                   NaN   
+1039030              0.0        0.0           0.0                   0.0   
+1039031              0.0        0.0           0.0                   0.0   
+
+         caron_size_1c_ssize_cm_tate  caron_size_1c_ssize_cm_yoko  \
+0                                0.0                          0.0   
+1                                0.0                          0.0   
+2                                0.0                          0.0   
+3                                0.0                          0.0   
+4                                0.0                          0.0   
+...                              ...                          ...   
+1039027                          0.0                          0.0   
+1039028                          0.0                          0.0   
+1039029                          NaN                          NaN   
+1039030                          0.0                          0.0   
+1039031                          0.0                          0.0   
+
+         caron_size_1c_ssize_cm_h  prd_kn_yobi  maker_shiire_tanka  \
+0                             0.0            0                   0   
+1                             0.0            0                   0   
+2                             0.0            0                   0   
+3                             0.0            0                   0   
+4                             0.0            0                   0   
+...                           ...          ...                 ...   
+1039027                       0.0            0                   0   
+1039028                       0.0            0                   0   
+1039029                       NaN            0                   0   
+1039030                       0.0            0                   0   
+1039031                       0.0            0                   0   
+
+         nonyu_youbi_kbn  kaigai_chozai_kigen_nissu  processing_center_kbn  \
+0                      0                          0                      0   
+1                      0                          0                      0   
+2                      0                          0                      0   
+3                      0                          0                      0   
+4                      0                          0                      0   
+...                  ...                        ...                    ...   
+1039027                0                          0                      0   
+1039028                0                          0                      0   
+1039029                0                          0                      0   
+1039030                0                          0                      0   
+1039031                0                          0                      0   
+
+         prd_grp_kbn  shomi_kikan_nissu  mikiribi_nissu  saitei_case_su  \
+0                  0                  0               0               0   
+1                  0                  0               0               0   
+2                  0                  0               0               0   
+3                  0                  0               0               0   
+4                  0                  0               0               0   
+...              ...                ...             ...             ...   
+1039027            0                  0               0               0   
+1039028            0                  0               0               0   
+1039029            0                  0               0               0   
+1039030            0                  0               0               0   
+1039031            0                  0               0               0   
+
+         shibai_flg  sts_cd  sakujo_kbn  sakujo_shiji_ymd  season_color_nendo  \
+0                 0       2           0                 0                 NaN   
+1                 0       2           0                 0                 NaN   
+2                 0       2           0                 0                 NaN   
+3                 0       2           0                 0                 NaN   
+4                 0       2           0                 0                 NaN   
+...             ...     ...         ...               ...                 ...   
+1039027           0       2           0                 0                 NaN   
+1039028           0       2           0                 0                 NaN   
+1039029           0       3           1          20150514                 NaN   
+1039030           0       2           0                 0                 NaN   
+1039031           0       2           0                 0                 NaN   
+
+         color_season_cd  prd_size_koso_h  prd_size_koso_w  prd_size_koso_d  \
+0                    NaN              NaN              NaN              NaN   
+1                    NaN              NaN              NaN              NaN   
+2                    NaN              NaN              NaN              NaN   
+3                    NaN              NaN              NaN              NaN   
+4                    NaN              NaN              NaN              NaN   
+...                  ...              ...              ...              ...   
+1039027              NaN              NaN              NaN              NaN   
+1039028              NaN              NaN              NaN              NaN   
+1039029              NaN              NaN              NaN              NaN   
+1039030              NaN              NaN              NaN              NaN   
+1039031              NaN              NaN              NaN              NaN   
+
+         tnw_pack_size_h  tnw_pack_size_w  tnw_pack_size_d  \
+0                    NaN              NaN              NaN   
+1                    NaN              NaN              NaN   
+2                    NaN              NaN              NaN   
+3                    NaN              NaN              NaN   
+4                    NaN              NaN              NaN   
+...                  ...              ...              ...   
+1039027              NaN              NaN              NaN   
+1039028              NaN              NaN              NaN   
+1039029              NaN              NaN              NaN   
+1039030              NaN              NaN              NaN   
+1039031              NaN              NaN              NaN   
+
+         pallet_tsumitsuke_su  pallet_tsumitsuke_kon_su  \
+0                         NaN                       NaN   
+1                         NaN                       NaN   
+2                         NaN                       NaN   
+3                         NaN                       NaN   
+4                         0.0                       0.0   
+...                       ...                       ...   
+1039027                   NaN                       NaN   
+1039028                   NaN                       NaN   
+1039029                   0.0                       0.0   
+1039030                   NaN                       NaN   
+1039031                   NaN                       NaN   
+
+         pallet_tsumitsuke_dan_su  pallet_so_juryo  prd_kigen_taisho_flg  \
+0                             NaN              NaN                     1   
+1                             NaN              NaN                     1   
+2                             NaN              NaN                     1   
+3                             NaN              NaN                     0   
+4                             0.0              0.0                     1   
+...                           ...              ...                   ...   
+1039027                       NaN              NaN                     0   
+1039028                       NaN              NaN                     0   
+1039029                       0.0              0.0                     0   
+1039030                       NaN              NaN                     0   
+1039031                       NaN              NaN                     0   
+
+         kijun_cd  kijun_kikan  prd_toroku_ymd  prd_toroku_hms  pop_hakko_kbn  \
+0             1.0         30.0        19930622               0            0.0   
+1             1.0         30.0        19930622               0            0.0   
+2             1.0         30.0        20200909           35406            0.0   
+3             NaN          0.0        19930622               0            0.0   
+4             1.0         30.0        19930622               0            0.0   
+...           ...          ...             ...             ...            ...   
+1039027       NaN          0.0        19930622               0            0.0   
+1039028       NaN          0.0        19930622               0            0.0   
+1039029       NaN          NaN        20070808          134833            0.0   
+1039030       NaN          NaN        19930622               0            0.0   
+1039031       NaN          NaN        19960919          120000            0.0   
+
+         pop_out_trgt_flg pop_catch_copy  sz_inf pop_comment1 pop_comment2  \
+0                     NaN            NaN     NaN          NaN          NaN   
+1                     0.0            NaN     NaN          NaN          NaN   
+2                     0.0            NaN     NaN          NaN          NaN   
+3                     0.0            NaN     NaN          NaN          NaN   
+4                     0.0            NaN     NaN          NaN          NaN   
+...                   ...            ...     ...          ...          ...   
+1039027               0.0            NaN     NaN          NaN          NaN   
+1039028               0.0            NaN     NaN          NaN          NaN   
+1039029               0.0            NaN     NaN          NaN          NaN   
+1039030               0.0            NaN     NaN          NaN          NaN   
+1039031               2.0            NaN     NaN          NaN          NaN   
+
+        pop_kino01 pop_kino02 pop_kino03 pop_kino04 pop_kino05 pop_kino06  \
+0              NaN        NaN        NaN        NaN        NaN        NaN   
+1              NaN        NaN        NaN        NaN        NaN        NaN   
+2              NaN        NaN        NaN        NaN        NaN        NaN   
+3              NaN        NaN        NaN        NaN        NaN        NaN   
+4              NaN        NaN        NaN        NaN        NaN        NaN   
+...            ...        ...        ...        ...        ...        ...   
+1039027        NaN        NaN        NaN        NaN        NaN        NaN   
+1039028        NaN        NaN        NaN        NaN        NaN        NaN   
+1039029        NaN        NaN        NaN        NaN        NaN        NaN   
+1039030        NaN        NaN        NaN        NaN        NaN        NaN   
+1039031        NaN        NaN        NaN        NaN        NaN        NaN   
+
+        pop_kino07 pop_kino08 pop_kino09 pop_kino10  prd_pos_msg_crl_kbn  \
+0              NaN        NaN        NaN        NaN                  NaN   
+1              NaN        NaN        NaN        NaN                  NaN   
+2              NaN        NaN        NaN        NaN                  NaN   
+3              NaN        NaN        NaN        NaN                  NaN   
+4              NaN        NaN        NaN        NaN                  NaN   
+...            ...        ...        ...        ...                  ...   
+1039027        NaN        NaN        NaN        NaN                  NaN   
+1039028        NaN        NaN        NaN        NaN                  NaN   
+1039029        NaN        NaN        NaN        NaN                  NaN   
+1039030        NaN        NaN        NaN        NaN                  NaN   
+1039031        NaN        NaN        NaN        NaN                  NaN   
+
+         send_trgt_flg  mdp_send_trgt_flg  pmm_toroku_zm_flg  \
+0                  0.0                0.0                  0   
+1                  0.0                0.0                  0   
+2                  0.0                0.0                  0   
+3                  0.0                0.0                  0   
+4                  0.0                0.0                  0   
+...                ...                ...                ...   
+1039027            0.0                0.0                  0   
+1039028            0.0                0.0                  0   
+1039029            NaN                NaN                  0   
+1039030            0.0                0.0                  0   
+1039031            0.0                0.0                  0   
+
+         pmm_prd_kaiso_toroku_zm_flg  urishikiri_genka_rt  gentanka_riyo_kbn  \
+0                                  0                  NaN                NaN   
+1                                  0                  NaN                NaN   
+2                                  0                  NaN                NaN   
+3                                  0                  NaN                NaN   
+4                                  0                  NaN                NaN   
+...                              ...                  ...                ...   
+1039027                            0                  NaN                NaN   
+1039028                            0                  NaN                0.0   
+1039029                            0                  NaN                0.0   
+1039030                            0                  NaN                NaN   
+1039031                            0                  NaN                0.0   
+
+         honbu_crl_kbn  vmi_atreg_daihyo_tori_cd  pc_prd_shiji_send_trgt_flg  \
+0                    1                       NaN                         0.0   
+1                    1                       NaN                         0.0   
+2                    1                       NaN                         0.0   
+3                    1                       NaN                         0.0   
+4                    1                       NaN                         0.0   
+...                ...                       ...                         ...   
+1039027              1                       NaN                         0.0   
+1039028              1                       NaN                         0.0   
+1039029              1                       NaN                         NaN   
+1039030              1                       NaN                         0.0   
+1039031              1                       NaN                         0.0   
+
+         naka_juryo  naka_juryo_tani_cd  tnw_tnpn_size_h  tnw_tnpn_size_w  \
+0               0.0                   1            100.0             55.0   
+1               0.0                   1             85.0             55.0   
+2               0.0                   1             10.0             10.0   
+3               NaN                   1             10.0             10.0   
+4               NaN                   1              NaN              NaN   
+...             ...                 ...              ...              ...   
+1039027         0.0                   1            355.0            246.0   
+1039028         0.0                   1            125.0            200.0   
+1039029         NaN                   1              NaN              NaN   
+1039030         NaN                   1            150.0             45.0   
+1039031         NaN                   1              NaN              NaN   
+
+         tnw_tnpn_size_d  tnw_case_size_h  tnw_case_size_w  tnw_case_size_d  \
+0                   22.0              NaN              NaN              NaN   
+1                   22.0              NaN              NaN              NaN   
+2                   10.0              NaN              NaN              NaN   
+3                   10.0              NaN              NaN              NaN   
+4                    NaN              NaN              NaN              NaN   
+...                  ...              ...              ...              ...   
+1039027            246.0              NaN              NaN              NaN   
+1039028             80.0              NaN              NaN              NaN   
+1039029              NaN              NaN              NaN              NaN   
+1039030             45.0              NaN              NaN              NaN   
+1039031              NaN              NaN              NaN              NaN   
+
+         hook_ichi_x  hook_ichi_y  prd_juryo  prd_juryo_tani_cd  \
+0                NaN          NaN       27.0                  2   
+1                NaN          NaN       21.0                  2   
+2                NaN          NaN       10.0                  2   
+3                NaN          NaN       10.0                  2   
+4                NaN          NaN        NaN                  2   
+...              ...          ...        ...                ...   
+1039027          NaN          NaN     1800.0                  2   
+1039028          NaN          NaN      500.0                  2   
+1039029          NaN          NaN        NaN                  2   
+1039030          NaN          NaN      200.0                  2   
+1039031          NaN          NaN        NaN                  2   
+
+         frm_box_irisu  seisan_kojo_cd nb_maker_nm prd_sts_shikibetsu_kigo  \
+0                  NaN             NaN         NaN                     NaN   
+1                  NaN             NaN         NaN                     NaN   
+2                  NaN             NaN          ＪＴ                     NaN   
+3                  NaN             NaN         NaN                     NaN   
+4                  NaN             NaN         NaN                     NaN   
+...                ...             ...         ...                     ...   
+1039027            NaN             NaN         NaN                     NaN   
+1039028            NaN             NaN         エレス                     NaN   
+1039029            NaN             NaN         NaN                     NaN   
+1039030            NaN             NaN         キシマ                     NaN   
+1039031            NaN             NaN         NaN                     NaN   
+
+         prd_rank  tokushu_konpo_kbn cust_prd_no  hosho_kbn  hosho_kikan  \
+0            11.0                0.0         NaN        NaN          NaN   
+1             NaN                0.0         NaN        NaN          NaN   
+2             NaN                0.0         NaN        NaN          NaN   
+3            11.0                0.0         NaN        NaN          NaN   
+4            11.0                0.0         NaN        NaN          NaN   
+...           ...                ...         ...        ...          ...   
+1039027      11.0                0.0         NaN        1.0          4.0   
+1039028       5.0                0.0         NaN        1.0          3.0   
+1039029       NaN                0.0         NaN        NaN          NaN   
+1039030       NaN                0.0         NaN        NaN          NaN   
+1039031       NaN                0.0         NaN        NaN          NaN   
+
+         horei_kikaku_kbn  tokkyoken_shinsei_ymd  tokkyoken_toroku_ymd  \
+0                     NaN                    NaN                   NaN   
+1                     NaN                    NaN                   NaN   
+2                     NaN                    NaN                   NaN   
+3                     NaN                    NaN                   NaN   
+4                     NaN                    NaN                   NaN   
+...                   ...                    ...                   ...   
+1039027               NaN                    NaN                   NaN   
+1039028               NaN                    NaN                   NaN   
+1039029               NaN                    NaN                   NaN   
+1039030               NaN                    NaN                   NaN   
+1039031               NaN                    NaN                   NaN   
+
+         jitsuyo_shinanken_shinsei_ymd  jitsuyo_shinanken_toroku_ymd  \
+0                                  NaN                           NaN   
+1                                  NaN                           NaN   
+2                                  NaN                           NaN   
+3                                  NaN                           NaN   
+4                                  NaN                           NaN   
+...                                ...                           ...   
+1039027                            NaN                           NaN   
+1039028                            NaN                           NaN   
+1039029                            NaN                           NaN   
+1039030                            NaN                           NaN   
+1039031                            NaN                           NaN   
+
+         ishoken_shinsei_ymd  ishoken_toroku_ymd  shohyoken_shinsei_ymd  \
+0                        NaN                 NaN                    NaN   
+1                        NaN                 NaN                    NaN   
+2                        NaN                 NaN                    NaN   
+3                        NaN                 NaN                    NaN   
+4                        NaN                 NaN                    NaN   
+...                      ...                 ...                    ...   
+1039027                  NaN                 NaN                    NaN   
+1039028                  NaN                 NaN                    NaN   
+1039029                  NaN                 NaN                    NaN   
+1039030                  NaN                 NaN                    NaN   
+1039031                  NaN                 NaN                    NaN   
+
+         shohyoken_toroku_ymd          size_chuki  tai_kaju  tai_kaju_tani_cd  \
+0                         NaN                 NaN       NaN               NaN   
+1                         NaN                 NaN       NaN               NaN   
+2                         NaN                 NaN       NaN               NaN   
+3                         NaN                 NaN       NaN               NaN   
+4                         NaN                 NaN       NaN               NaN   
+...                       ...                 ...       ...               ...   
+1039027                   NaN                 NaN       NaN               NaN   
+1039028                   NaN                 NaN       NaN               NaN   
+1039029                   NaN                 NaN       NaN               NaN   
+1039030                   NaN  巾４．５ｘ奥４．５ｘ高さ１５（ｃｍ）       NaN               NaN   
+1039031                   NaN                 NaN       NaN               NaN   
+
+         pbsb_kaihatsu_kbn  czpos_torikomi_zm_flg  toroku_ymd  toroku_hms  \
+0                      NaN                      1    20240510      191347   
+1                      NaN                      1    20240813      190919   
+2                      NaN                      1    20200930       45059   
+3                      NaN                      1    20240916      190610   
+4                      NaN                      1    20240807      190750   
+...                    ...                    ...         ...         ...   
+1039027                NaN                      1    20250807      192415   
+1039028                NaN                      1    20250918      194218   
+1039029                NaN                      1    20070808      134833   
+1039030                NaN                      1    20220712      194944   
+1039031                NaN                      1    20190930      100616   
+
+         koshin_ymd  koshin_hms user_id     shori_pg_cd shori_kbn  upd_mng_no  \
+0          20240511         748     NaN  MD030C0401_B01         U           4   
+1          20240814        1109     NaN  MD030C0110_B01         I           3   
+2          20201001         754     NaN  MD030C0401_B01         U           3   
+3          20240917        1037     NaN  MD030C0401_B01         U           4   
+4          20240813        1145     NaN  MD030C0401_B01         U           4   
+...             ...         ...     ...             ...       ...         ...   
+1039027    20250808         801     NaN  MD030C0401_B01         U           4   
+1039028    20250919         737     NaN  MD030C0110_B01         I           3   
+1039029    20200630      120000  MANUAL  MD030C0110_B01         D          59   
+1039030    20220713         740     NaN  MD030C0401_B01         U           4   
+1039031    20200630      120000  MANUAL  MD030B0101_B01         U           2   
+
+         last_update_unyo_ymd    ins_batch_id                ins_dt_tm  \
+0                    20250928  MD090G0103_P01  2022-10-08 00:40:40.000   
+1                    20250928  MD090G0103_P01  2024-08-14 00:35:46.000   
+2                    20250928  MD090G0103_P01  2017-02-12 00:37:08.000   
+3                    20250928  MD090G0103_P01  2018-08-29 00:15:13.000   
+4                    20250928  MD090G0103_P01  2014-06-13 02:04:12.000   
+...                       ...             ...                      ...   
+1039027              20250928  MD090G0103_P01  2024-08-02 00:37:42.000   
+1039028              20250928  MD090G0103_P01  2023-07-15 00:30:50.000   
+1039029              20250928  MD090G0103_P01  2014-06-13 02:04:12.000   
+1039030              20250928  MD090G0103_P01  2017-07-26 00:48:40.000   
+1039031              20250928  MD090G0103_P01  2014-08-06 00:33:52.000   
+
+           upd_batch_id                upd_dt_tm  del_flg  del_dt_tm  
+0        MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+1        MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+2        MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+3        MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+4        MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+...                 ...                      ...      ...        ...  
+1039027  MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+1039028  MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+1039029  MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+1039030  MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
+1039031  MD090G0103_P01  2025-09-29 00:32:04.000        0        NaN  
