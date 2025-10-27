@@ -1,3 +1,153 @@
+import pytest
+from unittest.mock import patch, MagicMock, mock_open
+import sys
+import os
+import pandas as pd
+import yaml
+# ----- Pytest Fixtures for DataFrames -----
+
+patcher = patch("google.cloud.storage.Client", return_value=MagicMock())
+patcher.start()
+#sys.path.append("repos/cainz_demand-forecast/cainz/")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from main import main
+from repos.cainz_demand_forecast.cainz.common import common
+from repos.cainz_demand_forecast.cainz.short_term import short_term_preprocess_common
+
+@pytest.fixture
+def mock_product_master_df():
+   #today = datetime(2025, 10, 3)
+   today = datetime.now()
+   week_from_ymd = (today - timedelta(days=2)).strftime('%Y-%m-%d')
+   week_to_ymd = (today + timedelta(days=2)).strftime('%Y-%m-%d')
+   return pd.DataFrame({
+       'prd_cd': [47478640],
+       'dpt': [77],
+       'prdnmkj': ['Prod A'],
+       'baikatoitsu': [6580],
+       'hacchutanitoitsukosu': [1],
+       'daihyo_torihikisaki_cd': [926221],
+       'daihyo_torihikisaki_nm': ['Comp A'],
+       'asc_riyu_cd': [3],
+       'asc_prd_cd': [47478619],
+       'asc_daihyo_torihikisaki_cd': [987956],
+       'asc_daihyo_torihikisaki_nm': ['POS PLU'],
+       'iri_su': [24],
+       'hacchu_tani_toitsu_kosu': [24],
+       'baika': [98],
+       'uri_su': [1],
+       'uri_kin': [90],
+       'tenpo_cd': [760],
+       'nenshudo': [202530],
+       'week_from_ymd': [week_from_ymd],
+       'week_to_ymd': [week_to_ymd],
+   })
+
+
+@pytest.fixture
+def mock_calendar_df():
+   return pd.DataFrame({
+       "nenshudo": [202401, 202402, 202403],
+       "week_from_ymd": ["2025-10-24", "2024-02-01", "2024-03-01"],
+       "week_to_ymd": ["2025-10-24", "2024-02-07", "2024-03-07"]
+   })
+@pytest.fixture
+def mock_odas_df():
+   return pd.DataFrame({
+       "JANPRDCD": [200001, 200002],
+       "TENPOCD": [760, 761],
+       "odasamount": [5, 15],
+       "salesymd": [20240101, 20240201]
+   })
+@pytest.fixture
+def mock_sales_df():
+   return pd.DataFrame({
+       "PRDCD": [100001, 100002],
+       "TENPOCD": [760, 761],
+       "nenshudo": [202401, 202402],
+       "URISU": [10, 20]
+   })
+@pytest.fixture
+def mock_price_df():
+   return pd.DataFrame({
+       "PRDCD": ["100001", "100002"],
+       "KIKAKUBAIKA": [100, 200]
+   })
+
+
+mock_config = {
+   'path_week_master': 'dummy_path_week_master.csv',
+   'bucket_name': 'dummy-bucket',
+   'restrict_minmax': False,
+   'restrinct_tenpo_hacchu_end': False,
+   'output_6wk_2sales': False,
+   'add_reference_store': False,
+   'today_date_str': '2024-01-05'
+}
+
+
+# ----- Main Stage 2 Weekly Flow Test -----
+def test_main_stage2_weekly_flow(
+   mock_calendar_df,
+   mock_odas_df,
+   mock_sales_df,
+   mock_price_df
+):
+   with patch('builtins.open', mock_open(read_data="dummy")), \
+        patch('yaml.safe_load', return_value=mock_config), \
+        patch('pandas.read_csv', return_value=mock_calendar_df), \
+        patch('main.common.extract_as_df') as mock_extract_as_df, \
+        patch('main.get_df_cal_out_calender') as mock_get_df_cal_out_calender, \
+        patch('main.odas_correct') as mock_odas_correct, \
+        patch('main.process_sales_data') as mock_process_sales_data, \
+        patch('main.manage_cloud_function_trigger') as mock_manage_cloud_function_trigger, \
+        patch('main.storage.Client') as mock_storage_client:
+       # Set DataFrame return values for all mocks
+       mock_extract_as_df.return_value = mock_product_master_df
+       mock_get_df_cal_out_calender.return_value = mock_calendar_df
+       mock_odas_correct.return_value = mock_odas_df
+       mock_process_sales_data.return_value = mock_sales_df
+       mock_manage_cloud_function_trigger.return_value = True
+       # Mock GCP bucket/blobs
+       mock_bucket = MagicMock()
+       mock_blob = MagicMock()
+       mock_storage_client.return_value.bucket.return_value = mock_bucket
+       mock_bucket.list_blobs.return_value = [mock_blob]
+       mock_blob.delete.return_value = None
+       # Import and run main pipeline entrypoint
+       main()
+       # Assert all key processing steps and side effects were called
+       mock_extract_as_df.assert_called()
+       mock_get_df_cal_out_calender.assert_called()
+       mock_odas_correct.assert_called()
+       mock_process_sales_data.assert_called()
+       mock_manage_cloud_function_trigger.assert_called()
+       assert mock_bucket.list_blobs.called
+       assert mock_blob.delete.called  # Optional: verify file deletion side effect
+
+def teardown_module(module):
+    patcher.stop()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def main():
     tenpo_cd_ref = None
     path_tran_ref = None 
