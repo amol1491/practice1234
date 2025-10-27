@@ -1,3 +1,5 @@
+
+#############################This is my test_main.py file ##########################################
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
 import sys
@@ -146,7 +148,7 @@ def teardown_module(module):
 
 
 
-
+################################This is main function inside main.py file############################################
 
 def main():
     tenpo_cd_ref = None
@@ -202,10 +204,7 @@ def main():
             else:
                 path_tran_ref = "01_short_term/01_stage1_result/01_weekly/"+str(today)+'-6/'+str(tenpo_cd_ref)+"/{}_{}_time_series.csv"
 
-
-
-        
-        
+       
         
     ##################function 1
     sales_df, this_tenpo_theme_md_prdcd_list = process_sales_data(tenpo_cd, tenpo_cd_ref, path_tran)
@@ -428,7 +427,8 @@ def main():
 
 
 
-
+#########################################This are my logs after running main.py file####################################
+#######################################This log has table printed in def main function go throigh this carefully and update test_main.py accordingly ##############################
 2025-10-24 13:57:30,780 - INFO - Deleting files under stage2 completion check folder...
 2025-10-24 13:57:30,841 - INFO - ******************* today 2025-10-24
 2025-10-24 13:57:30,842 - INFO - ******************* today_date_str 2025-10-24
